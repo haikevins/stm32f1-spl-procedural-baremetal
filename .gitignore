@@ -1,0 +1,30 @@
+# Build output (keep the directory itself in Git)
+build/*
+!build/.gitkeep
+
+# Compiler-generated files
+*.o
+*.d
+*.su
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+
+# Debugger and coverage files
+*.gdb_history
+*.gcda
+*.gcno
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating-system files
+.DS_Store
+Thumbs.db
