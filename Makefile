@@ -1,4 +1,4 @@
-PROJECT ?= 01-blink-led
+PROJECT ?= template
 BUILD_DIR ?= build
 
 PREFIX ?= arm-none-eabi-
