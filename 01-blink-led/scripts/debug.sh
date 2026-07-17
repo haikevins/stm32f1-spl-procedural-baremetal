@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ELF_FILE="${1:-build/firmware.elf}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-GDB_BIN="${GDB:-arm-none-eabi-gdb}"
 
-for tool in openocd "${GDB_BIN}"; do
-    if ! command -v "${tool}" >/dev/null 2>&1; then
-        echo "error: ${tool} was not found in PATH" >&2
-        exit 127
-    fi
-done
-
-if [[ -f "${PROJECT_ROOT}/${ELF_FILE}" ]]; then
-    ELF_FILE="${PROJECT_ROOT}/${ELF_FILE}"
-elif [[ -f "${ELF_FILE}" ]]; then
-    ELF_FILE="$(realpath "${ELF_FILE}")"
+if [[ $# -ge 1 ]]; then
+    ELF_FILE="$1"
 else
+    mapfile -t ELF_CANDIDATES < <(find "${PROJECT_ROOT}/build" -maxdepth 1 -name '*.elf' 2>/dev/null)
+    if [[ ${#ELF_CANDIDATES[@]} -ne 1 ]]; then
+        echo "error: expected exactly one .elf file in build/, found ${#ELF_CANDIDATES[@]}; pass the path explicitly" >&2
+        exit 1
+    fi
+    ELF_FILE="${ELF_CANDIDATES[0]}"
+fi
+
+if ! command -v openocd >/dev/null 2>&1; then
+    echo "error: openocd was not found in PATH" >&2
+    exit 127
+fi
+
+if [[ ! -f "${PROJECT_ROOT}/${ELF_FILE}" && ! -f "${ELF_FILE}" ]]; then
     echo "error: ELF file not found: ${ELF_FILE}" >&2
     exit 1
 fi
 
-openocd -f "${SCRIPT_DIR}/openocd.cfg" >"${PROJECT_ROOT}/build/openocd.log" 2>&1 &
-OPENOCD_PID=$!
-trap 'kill "${OPENOCD_PID}" >/dev/null 2>&1 || true' EXIT INT TERM
+if [[ -f "${PROJECT_ROOT}/${ELF_FILE}" ]]; then
+    ELF_FILE="${PROJECT_ROOT}/${ELF_FILE}"
+else
+    ELF_FILE="$(realpath "${ELF_FILE}")"
+fi
 
-sleep 1
-
-"${GDB_BIN}" "${ELF_FILE}" \
-    -ex "target extended-remote localhost:3333" \
-    -ex "monitor reset halt"
+openocd \
+    -f "${SCRIPT_DIR}/openocd.cfg" \
+    -c "program ${ELF_FILE} verify reset exit"
