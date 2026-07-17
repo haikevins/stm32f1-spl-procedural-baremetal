@@ -8,7 +8,7 @@ differences between examples are limited to the feature being demonstrated.
 
 | No. | Project | Topic |
 |---:|---|---|
-| 01 | `01-blink-led` | GPIO output and non-blocking SysTick timing |
+| 1 | [01-blink-led](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/01-blink-led) | GPIO output and non-blocking SysTick timing |
 
 ## Common workflow
 
