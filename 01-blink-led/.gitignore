@@ -1,0 +1,13 @@
+# Build artifacts
+build/*
+!build/.gitignore
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
