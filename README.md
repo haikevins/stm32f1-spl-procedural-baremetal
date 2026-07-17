@@ -80,7 +80,7 @@ make
 Generated files:
 
 ```text
-build/firmware.elf
+build/firmware.elf # An example output filename is firmware
 build/firmware.hex
 build/firmware.bin
 build/firmware.map
