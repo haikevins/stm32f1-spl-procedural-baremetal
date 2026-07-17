@@ -13,8 +13,8 @@ differences between examples are limited to the feature being demonstrated.
 ## Common workflow
 
 ```bash
-cd 01-blink-led
-make PROJECT=01-blink-led
+cd 01-blink-led # project name
+make PROJECT=01-blink-led # output project name
 make clean
 ```
 
