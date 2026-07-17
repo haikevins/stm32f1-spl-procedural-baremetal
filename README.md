@@ -102,6 +102,14 @@ The Makefile intentionally exposes only the normal build and clean workflows.
 Flashing and debugging may be run with the scripts under `scripts/` or added by
 a concrete project when needed.
 
+## Flash
+
+Flash the firmware with ST-Link and OpenOCD:
+
+```bash
+make flash
+```
+
 ## Creating an example
 
 Clone the template branch and rename the directory:
