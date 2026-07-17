@@ -5,10 +5,9 @@ PREFIX ?= arm-none-eabi-
 CC := $(PREFIX)gcc
 OBJCOPY := $(PREFIX)objcopy
 SIZE := $(PREFIX)size
-GDB := $(PREFIX)gdb
 
 CPU_FLAGS := -mcpu=cortex-m3 -mthumb
-DEFINES := -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER
+DEFINES := -DSTM32F10X_MD -DUSE_STDPERIPH_DRIVER -DHSE_VALUE=8000000U
 
 INCLUDES := \
 	-Iapp/inc \
@@ -21,13 +20,14 @@ INCLUDES := \
 	-Ithird_party/CMSIS/CM3/DeviceSupport/ST/STM32F10x \
 	-Ithird_party/STM32F10x_StdPeriph_Driver/inc
 
-CFLAGS := $(CPU_FLAGS) $(DEFINES) $(INCLUDES) \
-	-std=c11 -O0 -g3 \
-	-Wall -Wextra -Wshadow -Wundef \
-	-ffunction-sections -fdata-sections -fstack-usage \
+COMMON_FLAGS := $(CPU_FLAGS) $(DEFINES) $(INCLUDES) \
+	-ffunction-sections -fdata-sections -fno-common
+
+CFLAGS := $(COMMON_FLAGS) -std=c11 -Og -g3 \
+	-Wall -Wextra -Wshadow -Wundef -Wdouble-promotion \
 	-MMD -MP
 
-ASFLAGS := $(CPU_FLAGS) -x assembler-with-cpp -g3
+ASFLAGS := $(COMMON_FLAGS) -x assembler-with-cpp -g3
 
 LINKER_SCRIPT := linker/STM32F103C8Tx_FLASH.ld
 LDFLAGS := $(CPU_FLAGS) \
@@ -69,7 +69,8 @@ ELF := $(BUILD_DIR)/$(PROJECT).elf
 HEX := $(BUILD_DIR)/$(PROJECT).hex
 BIN := $(BUILD_DIR)/$(PROJECT).bin
 
-.PHONY: all clean flash debug size help
+.DEFAULT_GOAL := all
+.PHONY: all clean
 
 all: $(ELF) $(HEX) $(BIN)
 
@@ -92,28 +93,9 @@ $(BUILD_DIR)/%.o: %.s
 	@mkdir -p $(dir $@)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-size: $(ELF)
-	$(SIZE) -A $<
-
-flash: all
-	./scripts/flash.sh $(ELF)
-
-debug: all
-	./scripts/debug.sh $(ELF)
-
 clean:
-	find $(BUILD_DIR) -mindepth 1 ! -name .gitkeep -delete
-
-help:
-	@echo "Targets:"
-	@echo "  all    Build ELF, HEX, and BIN files"
-	@echo "  flash  Build and flash with OpenOCD/ST-Link"
-	@echo "  debug  Build and start an OpenOCD + GDB session"
-	@echo "  size   Show section-level size information"
-	@echo "  clean  Remove generated build files"
-	@echo ""
-	@echo "Variables:"
-	@echo "  PROJECT=<name>       Output base name (default: firmware)"
-	@echo "  PREFIX=<tool-prefix> Toolchain prefix (default: arm-none-eabi-)"
+	rm -rf $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)
+	touch $(BUILD_DIR)/.gitkeep
 
 -include $(DEPENDENCIES)

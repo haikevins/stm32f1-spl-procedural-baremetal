@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-/** Initialize application-level state and modules. */
+/** Initialize application-level modules and state. */
 void App_Init(void);
 
 /** Execute one non-blocking application iteration. */

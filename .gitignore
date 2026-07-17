@@ -1,22 +1,16 @@
-# Build output (keep the directory itself in Git)
+# Build output
 build/*
 !build/.gitkeep
 
-# Compiler-generated files
+# Dependency and analysis output
 *.o
 *.d
 *.su
-*.a
 *.elf
 *.hex
 *.bin
 *.map
 *.lst
-
-# Debugger and coverage files
-*.gdb_history
-*.gcda
-*.gcno
 
 # Editors and IDEs
 .vscode/
@@ -25,6 +19,6 @@ build/*
 *.swo
 *~
 
-# Operating-system files
+# Operating-system metadata
 .DS_Store
 Thumbs.db

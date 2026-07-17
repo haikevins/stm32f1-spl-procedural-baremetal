@@ -1,91 +1,73 @@
-# Project Architecture
-
-This template separates application logic from board-specific and vendor code.
-It intentionally contains no LED, button, UART, or other feature example.
-Feature implementations belong in the `examples` branch or in a project created
-from this template.
+# Architecture
 
 ## Dependency direction
 
 ```text
-app
- |
- v
-bsp --------> drivers
- |                |
- v                v
-system         middleware
- |                |
- +-------> third_party
+main.c
+  -> bsp
+  -> app
 
-lib may be used by app, bsp, drivers, and middleware.
+app
+  -> bsp
+  -> drivers
+  -> lib
+  -> middleware
+
+bsp
+  -> CMSIS / SPL
+
+drivers
+  -> bsp or narrow hardware interfaces
+  -> CMSIS / SPL when appropriate
 ```
 
-Dependencies should point downward. Lower layers must not depend on application
-code.
+Lower layers must not depend on application policy.
 
-## Layers
+## Stable template interfaces
+
+The following interfaces form the common base for every example:
+
+```c
+void BSP_Init(void);
+void App_Init(void);
+void App_Run(void);
+```
+
+`main.c`, `app.h`, and `bsp.h` should normally remain byte-for-byte identical to
+the template. Concrete examples implement behavior in `app.c`, extend `bsp.c`,
+and add focused modules such as `bsp_led.c` or `system_time.c`.
+
+## Startup sequence
+
+1. `Reset_Handler` initializes `.data` and `.bss`.
+2. `SystemInit()` configures the MCU clock before `main()`.
+3. `main()` calls `BSP_Init()` once.
+4. `main()` calls `App_Init()` once.
+5. `main()` repeatedly calls non-blocking `App_Run()`.
+
+## Layer responsibilities
 
 ### `app/`
 
-Contains the product-specific program flow. `main.c` initializes the BSP and
-application, then repeatedly calls `App_Run()`. Keep `App_Run()` non-blocking so
-that the project can later adopt cooperative scheduling or an RTOS without a
-large rewrite.
+Application state, policies, use-case orchestration, and the super-loop step.
 
 ### `bsp/`
 
-Contains board-level initialization and board-specific mappings. The minimal
-template only provides `BSP_Init()`. Add modules such as `bsp_led`, `bsp_button`,
-or `bsp_uart` only when a concrete board or project requires them.
+Board-specific pins, onboard peripherals, and board initialization.
 
 ### `drivers/`
 
-Contains reusable drivers for external devices and sensors. Drivers should use
-abstracted hardware services where practical and should not contain application
-policy.
+Reusable drivers for external devices and sensors.
 
 ### `lib/`
 
-Contains reusable, hardware-independent utilities such as ring buffers, CRC
-helpers, state machines, and data structures.
+Hardware-independent helpers and algorithms.
 
 ### `middleware/`
 
-Contains protocol stacks, file systems, RTOS integrations, and other components
-that sit between drivers and the application.
+Protocol stacks, RTOS integration, file systems, and communication services.
 
 ### `system/`
 
-Contains startup code, the interrupt file, system configuration, and C-library
-syscall stubs. `SystemInit()` from CMSIS runs before `main()`.
-
-### `third_party/`
-
-Contains CMSIS and the STM32F10x Standard Peripheral Library. Keep upstream
-notices and licenses intact. Avoid modifying these files unless a documented
-vendor patch is required.
-
-## Startup flow
-
-```text
-Reset
-  -> Reset_Handler
-      -> initialize .data
-      -> clear .bss
-      -> SystemInit()
-      -> __libc_init_array()
-      -> main()
-          -> BSP_Init()
-          -> App_Init()
-          -> while (1)
-              -> App_Run()
-```
-
-## Adding a feature
-
-1. Add reusable peripheral or sensor code under `drivers/`.
-2. Add board pin mappings and board initialization under `bsp/`.
-3. Add feature orchestration under `app/`.
-4. Add any required interrupt handler in `system/src/stm32f10x_it.c`.
-5. Keep generated files inside `build/`.
+Startup assembly, exception handlers, system services, and low-level runtime
+support.

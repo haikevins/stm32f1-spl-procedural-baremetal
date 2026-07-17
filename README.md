@@ -1,83 +1,75 @@
 # STM32F1 SPL Procedural Bare-Metal Template
 
-A minimal, buildable C project template for the STM32F103C8Tx using CMSIS and
-the STM32F10x Standard Peripheral Library (SPL).
+A minimal C project template for the STM32F103C8Tx using CMSIS, the
+STM32F10x Standard Peripheral Library (SPL), GNU Make, and the GNU Arm
+Embedded Toolchain.
 
-This branch is intentionally feature-neutral. It provides project structure,
-startup code, linker configuration, build tooling, and empty extension points.
-Concrete projects such as LED, button, UART, timer, and communication examples
-belong in the `examples` branch.
+The `template` branch contains only reusable project infrastructure and neutral
+extension points. Complete applications belong in the `examples` branch.
 
-## Target
-
-- MCU: STM32F103C8Tx
-- Core: Arm Cortex-M3
-- Flash: 64 KiB
-- SRAM: 20 KiB
-- Library: STM32F10x SPL v3.5.0
-- Build system: GNU Make
-- Debug probe: ST-Link via OpenOCD
-
-## Structure
+## Project structure
 
 ```text
 .
-├── app/                          # Application flow and product logic
+├── app/
 │   ├── inc/app.h
 │   └── src/
 │       ├── app.c
 │       └── main.c
-├── bsp/                          # Minimal board support layer
+├── bsp/
 │   ├── inc/bsp.h
 │   └── src/bsp.c
-├── drivers/                      # External-device drivers
+├── drivers/
 │   ├── inc/.gitkeep
 │   └── src/.gitkeep
-├── lib/                          # Hardware-independent utilities
+├── lib/
 │   ├── inc/.gitkeep
 │   └── src/.gitkeep
-├── middleware/                   # Protocol stacks, RTOS, file systems
+├── middleware/
 │   ├── inc/.gitkeep
 │   └── src/.gitkeep
-├── system/                       # Startup, interrupts, config, syscalls
-│   ├── inc/
-│   │   ├── stm32f10x_conf.h
-│   │   └── stm32f10x_it.h
-│   ├── src/
-│   │   ├── stm32f10x_it.c
-│   │   └── syscalls.c
-│   └── startup/startup_stm32f10x_md_gcc.s
-├── third_party/                  # CMSIS and STM32F10x SPL
-├── linker/STM32F103C8Tx_FLASH.ld
+├── system/
+├── third_party/
+├── linker/
 ├── scripts/
-│   ├── debug.sh
-│   ├── flash.sh
-│   └── openocd.cfg
-├── docs/architecture.md
+├── docs/
 ├── build/.gitkeep
 ├── Makefile
 ├── LICENSE
 └── .gitignore
 ```
 
-## Requirements
+## Core flow
 
-Install the following tools and ensure they are available in `PATH`:
-
-- `arm-none-eabi-gcc`
-- `arm-none-eabi-objcopy`
-- `arm-none-eabi-size`
-- GNU Make
-- OpenOCD for flashing and debugging
-- `arm-none-eabi-gdb` for debugging
-
-On Debian/Ubuntu, package names commonly include:
-
-```bash
-sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi make openocd gdb-multiarch
+```text
+Reset_Handler
+    -> SystemInit()
+    -> main()
+        -> BSP_Init()
+        -> App_Init()
+        -> while (1)
+            -> App_Run()
 ```
 
-Package names vary by distribution.
+Responsibilities:
+
+- `main.c` owns only the top-level initialization order and super loop.
+- `bsp.c` initializes board-level resources.
+- `app.c` contains application policy and non-blocking processing.
+- `drivers/` contains reusable external-device drivers.
+- `lib/` contains hardware-independent utilities.
+- `middleware/` contains protocol stacks, RTOS ports, and file systems.
+
+## Requirements
+
+Install GNU Make and the GNU Arm Embedded Toolchain so these commands are in
+`PATH`:
+
+```text
+arm-none-eabi-gcc
+arm-none-eabi-objcopy
+arm-none-eabi-size
+```
 
 ## Build
 
@@ -94,80 +86,49 @@ build/firmware.bin
 build/firmware.map
 ```
 
-Use a custom output name:
+To choose another output name:
 
 ```bash
 make PROJECT=my_firmware
 ```
 
-Clean generated files while preserving `build/.gitkeep`:
+Remove generated files while preserving `build/.gitkeep`:
 
 ```bash
 make clean
 ```
 
-## Flash
+The Makefile intentionally exposes only the normal build and clean workflows.
+Flashing and debugging may be run with the scripts under `scripts/` or added by
+a concrete project when needed.
 
-Connect an ST-Link probe over SWD, then run:
+## Creating an example
 
-```bash
-make flash
-```
-
-Equivalent direct command:
-
-```bash
-./scripts/flash.sh build/firmware.elf
-```
-
-## Debug
-
-```bash
-make debug
-```
-
-The script starts OpenOCD and opens a GDB session connected to
-`localhost:3333`.
-
-## Start a new project
-
-Clone the template branch:
+Clone the template branch and rename the directory:
 
 ```bash
 git clone --branch template --single-branch \
   git@github.com:haikevins/stm32f1-spl-procedural-baremetal.git \
-  my-stm32-project
+  02-example-name
 ```
 
-Then remove the inherited repository history and initialize a new repository:
+Keep the base interfaces unchanged where possible:
 
-```bash
-cd my-stm32-project
-rm -rf .git
-git init
+```c
+void BSP_Init(void);
+void App_Init(void);
+void App_Run(void);
 ```
 
-Recommended first changes:
-
-1. Set `PROJECT` in the Makefile or pass it to `make`.
-2. Add board initialization to `BSP_Init()`.
-3. Add reusable hardware modules under `drivers/`.
-4. Add application behavior to `App_Init()` and `App_Run()`.
-5. Add interrupt handlers only when required.
+Then add only the modules and implementation required by the example. A normal
+example should keep `main.c`, `app.h`, and `bsp.h` identical to the template.
 
 ## Design rules
 
-- Keep `main.c` small.
-- Keep application policy out of BSP and drivers.
+- Keep `main.c` small and unchanged across projects.
+- Call `BSP_Init()` exactly once from `main()`.
 - Keep `App_Run()` non-blocking.
-- Do not commit generated build files.
-- Do not modify `third_party/` without documenting the reason.
-- Put complete demonstrations in the `examples` branch, not in this template.
-
-See [docs/architecture.md](docs/architecture.md) for the dependency rules and
-startup flow.
-
-## License
-
-Project-owned files are licensed under the MIT License. Files under
-`third_party/` retain their original STMicroelectronics licenses and notices.
+- Put application decisions in `app/`, not in BSP or drivers.
+- Put board pin mappings and board peripheral setup in `bsp/`.
+- Do not commit generated files from `build/`.
+- Keep vendor code under `third_party/` unchanged.
