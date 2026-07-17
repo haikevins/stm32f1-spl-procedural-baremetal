@@ -31,7 +31,7 @@ main()
 ## Build
 
 ```bash
-make PROJECT=01-blink-led
+make
 ```
 
 Generated files:
@@ -43,15 +43,24 @@ build/01-blink-led.bin
 build/01-blink-led.map
 ```
 
+Flash the firmware with ST-Link and OpenOCD:
+
+```bash
+make flash
+```
+
+The `flash` target builds `build/01-blink-led.elf` when necessary, then programs,
+verifies, and resets the STM32 through `scripts/flash.sh`.
+
 Clean the project:
 
 ```bash
 make clean
 ```
 
-The example deliberately uses the same minimal Makefile as the template. It has
-no separate `size`, `disasm`, `rebuild`, or `help` target. Firmware size is
-printed automatically after linking.
+The example deliberately keeps a small Makefile with only the essential
+workflows: build, flash, and clean. Firmware size is printed automatically after
+linking.
 
 ## Relevant files
 

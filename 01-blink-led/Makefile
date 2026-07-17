@@ -1,4 +1,4 @@
-PROJECT ?= firmware
+PROJECT ?= 01-blink-led
 BUILD_DIR ?= build
 
 PREFIX ?= arm-none-eabi-
@@ -70,7 +70,7 @@ HEX := $(BUILD_DIR)/$(PROJECT).hex
 BIN := $(BUILD_DIR)/$(PROJECT).bin
 
 .DEFAULT_GOAL := all
-.PHONY: all clean
+.PHONY: all clean flash
 
 all: $(ELF) $(HEX) $(BIN)
 
@@ -84,6 +84,9 @@ $(HEX): $(ELF)
 
 $(BIN): $(ELF)
 	$(OBJCOPY) -O binary -S $< $@
+
+flash: $(ELF)
+	./scripts/flash.sh $(ELF)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
