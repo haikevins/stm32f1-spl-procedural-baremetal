@@ -1,18 +1,18 @@
 #ifndef APP_H
 #define APP_H
 
-#include <stdbool.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/**
- * @brief Initialize the Blink LED application.
- *
- * @return true when all required peripherals were initialized successfully.
- */
-bool App_Init(void);
+/** Initialize application-level modules and state. */
+void App_Init(void);
 
-/**
- * @brief Execute one non-blocking application iteration.
- */
+/** Execute one non-blocking application iteration. */
 void App_Run(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* APP_H */

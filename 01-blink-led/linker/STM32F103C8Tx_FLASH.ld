@@ -1,4 +1,5 @@
-/* STM32F103C8T6: 64 KiB Flash, 20 KiB SRAM. */
+/* STM32F103C8Tx: 64 KiB Flash, 20 KiB SRAM. */
+
 ENTRY(Reset_Handler)
 
 MEMORY
@@ -8,7 +9,7 @@ MEMORY
 }
 
 _estack = ORIGIN(RAM) + LENGTH(RAM);
-_Min_Heap_Size = 0x000;
+_Min_Heap_Size = 0x200;
 _Min_Stack_Size = 0x400;
 
 SECTIONS
@@ -97,12 +98,13 @@ SECTIONS
     ._user_heap_stack (NOLOAD) :
     {
         . = ALIGN(8);
-        PROVIDE(end = .);
-        PROVIDE(_end = .);
-        . += _Min_Heap_Size;
-        . += _Min_Stack_Size;
+        _end = .;
+        end = .;
+        . = . + _Min_Heap_Size;
+        . = . + _Min_Stack_Size;
         . = ALIGN(8);
     } > RAM
 
-}
 
+    .ARM.attributes 0 : { *(.ARM.attributes) }
+}

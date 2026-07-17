@@ -1,15 +1,10 @@
 #include "app.h"
+#include "bsp.h"
 
 int main(void)
 {
-    if (!App_Init())
-    {
-        /* Initialization failed. Stay here so the debugger can inspect state. */
-        while (1)
-        {
-            /* Intentionally empty. */
-        }
-    }
+    BSP_Init();
+    App_Init();
 
     while (1)
     {
