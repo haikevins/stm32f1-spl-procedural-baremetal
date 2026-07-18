@@ -1,13 +1,24 @@
-# Build artifacts
+# Build output
 build/*
-!build/.gitignore
+!build/.gitkeep
 
-# Editor / IDE
+# Dependency and analysis output
+*.o
+*.d
+*.su
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+
+# Editors and IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# OS metadata
+# Operating-system metadata
 .DS_Store
 Thumbs.db
