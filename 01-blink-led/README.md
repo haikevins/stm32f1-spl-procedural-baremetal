@@ -1,74 +1,55 @@
-# 01 - Blink LED
+# Example 01: Non-Blocking LED Blink
 
-A non-blocking Blink LED example created directly from the `template` branch.
-It targets a common STM32F103C8 Blue Pill board whose onboard LED is connected
-to PC13 and is active-low.
+A layered STM32F103C8T6 Blue Pill example using CMSIS and the STM32F10x
+Standard Peripheral Library.
 
-## What changed from the template
+The onboard active-low LED on PC13 toggles every 500 ms. SysTick provides a
+1 kHz timebase, and the super-loop sleeps with `WFI` between interrupts.
 
-The base project was copied without redesigning its core flow:
-
-- `app/inc/app.h` is unchanged;
-- `app/src/main.c` is unchanged;
-- `bsp/inc/bsp.h` is unchanged;
-- `app/src/app.c` implements the blink policy;
-- `bsp/src/bsp.c` extends board initialization;
-- `bsp_led.*` adds the onboard LED BSP module;
-- `system_time.*` and `SysTick_Handler()` add a 1 ms time base.
+## Dependency paths
 
 ```text
-main()
-    -> BSP_Init()
-        -> SystemCoreClockUpdate()
-        -> BSP_LED_Init()
-    -> App_Init()
-        -> System_Time_Init()
-    -> while (1)
-        -> App_Run()
-            -> BSP_LED_Toggle() every 500 ms
+Application -> Time Service -> Board Timebase -> CMSIS SysTick
+Application -> Indication Service -> Board LED -> STM32 SPL GPIO
 ```
 
+Application code does not include BSP, SPL, CMSIS, or STM32 device headers.
+
 ## Build
+
+Preserve the existing `third_party/` vendor sources, then run:
 
 ```bash
 make
 ```
 
-Generated files:
-
-```text
-build/01-blink-led.elf
-build/01-blink-led.hex
-build/01-blink-led.bin
-build/01-blink-led.map
-```
-
-Flash the firmware with ST-Link and OpenOCD:
+## Flash
 
 ```bash
 make flash
 ```
 
-The `flash` target builds `build/01-blink-led.elf` when necessary, then programs,
-verifies, and resets the STM32 through `scripts/flash.sh`.
-
-Clean the project:
+## Debug
 
 ```bash
-make clean
+# Terminal 1
+make debug-server
+
+# Terminal 2
+make debug
 ```
 
-The example deliberately keeps a small Makefile with only the essential
-workflows: build, flash, and clean. Firmware size is printed automatically after
-linking.
+## Configuration
 
-## Relevant files
+- Blink period: `config/application_config.h`
+- Timebase frequency: `config/board_config.h`
+- Board pin mapping: `bsp/bluepill/src/board_pins.h`
+- Selected SPL modules: `config/modules.mk`
+
+## Expected behavior
 
 ```text
-app/src/app.c
-bsp/inc/bsp_led.h
-bsp/src/bsp_led.c
-system/inc/system_time.h
-system/src/system_time.c
-system/src/stm32f10x_it.c
+PC13 low  -> LED on
+PC13 high -> LED off
+Toggle period: 500 ms
 ```
