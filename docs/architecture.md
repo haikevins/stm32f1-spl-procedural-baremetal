@@ -1,73 +1,95 @@
-# Architecture
+# Layered Architecture
 
-## Dependency direction
+## Runtime dependency direction
 
 ```text
-main.c
-  -> bsp
-  -> app
-
-app
-  -> bsp
-  -> drivers
-  -> lib
-  -> middleware
-
-bsp
-  -> CMSIS / SPL
-
-drivers
-  -> bsp or narrow hardware interfaces
-  -> CMSIS / SPL when appropriate
+Application
+    |
+    v
+Services
+    |
+    v
+BSP / ECU Abstraction
+    |
+    v
+STM32F10x Standard Peripheral Library
+    |
+    v
+CMSIS
+    |
+    v
+STM32F103 hardware
 ```
 
-Lower layers must not depend on application policy.
+`system/` is the composition root. It may initialize and connect multiple
+layers, but it must not contain product behavior.
 
-## Stable template interfaces
-
-The following interfaces form the common base for every example:
-
-```c
-void BSP_Init(void);
-void App_Init(void);
-void App_Run(void);
-```
-
-`main.c`, `app.h`, and `bsp.h` should normally remain byte-for-byte identical to
-the template. Concrete examples implement behavior in `app.c`, extend `bsp.c`,
-and add focused modules such as `bsp_led.c` or `system_time.c`.
-
-## Startup sequence
-
-1. `Reset_Handler` initializes `.data` and `.bss`.
-2. `SystemInit()` configures the MCU clock before `main()`.
-3. `main()` calls `BSP_Init()` once.
-4. `main()` calls `App_Init()` once.
-5. `main()` repeatedly calls non-blocking `App_Run()`.
+`startup/`, `linker/`, `runtime/`, `config/`, `tools/`, and `third_party/`
+are infrastructure areas rather than application layers.
 
 ## Layer responsibilities
 
-### `app/`
+### Application
 
-Application state, policies, use-case orchestration, and the super-loop step.
+Contains product policy, state machines, and non-blocking behavior.
 
-### `bsp/`
+Application code may include Services and hardware-independent Common code.
+It must not include BSP, ECUAL, CMSIS, SPL, or raw STM32 headers.
 
-Board-specific pins, onboard peripherals, and board initialization.
+### Services
 
-### `drivers/`
+Expose hardware-independent capabilities such as time, indications,
+communication, diagnostics, scheduling, and event delivery.
 
-Reusable drivers for external devices and sensors.
+Services may use BSP and ECUAL public APIs. Services must not include
+Application headers or raw STM32/SPL headers.
 
-### `lib/`
+### BSP
 
-Hardware-independent helpers and algorithms.
+Maps logical board resources to physical MCU pins and peripherals.
 
-### `middleware/`
+Examples include onboard LEDs, buttons, console ports, and the board
+timebase. BSP modules may call SPL and CMSIS.
 
-Protocol stacks, RTOS integration, file systems, and communication services.
+### ECU Abstraction
 
-### `system/`
+Contains drivers for external devices such as displays, sensors, EEPROMs,
+and transceivers. For portability, ECUAL modules should use BSP bus
+interfaces rather than including STM32 SPL directly.
 
-Startup assembly, exception handlers, system services, and low-level runtime
-support.
+### Common
+
+Contains hardware-independent utilities such as CRC, fixed-size queues,
+ring buffers, bit utilities, and generic data types.
+
+### System
+
+Owns the composition root, initialization order, the main super-loop, idle
+policy, and fatal-error policy. It may connect layers but must not implement
+application behavior.
+
+### Vendor peripheral layer
+
+`third_party/STM32F10x_StdPeriph_Driver` acts as the vendor peripheral
+driver or MCAL-equivalent layer for this SPL-based project.
+
+`third_party/CMSIS` provides Cortex-M3 and STM32F103 device definitions.
+
+## Interrupt rule
+
+An ISR must remain in the lowest layer that owns its hardware resource. It
+may acknowledge flags, move data into a static low-level buffer, or update a
+low-level counter.
+
+An ISR must not call Application or Service functions.
+
+## Enforcement
+
+Run:
+
+```bash
+make check-layers
+```
+
+The checker rejects forbidden project-header dependencies before the
+firmware is compiled.

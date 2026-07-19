@@ -1,75 +1,26 @@
 # STM32F1 SPL Procedural Bare-Metal Template
 
-A minimal C project template for the STM32F103C8Tx using CMSIS, the
-STM32F10x Standard Peripheral Library (SPL), GNU Make, and the GNU Arm
-Embedded Toolchain.
+A buildable STM32F103C8T6 project skeleton using CMSIS, the STM32F10x
+Standard Peripheral Library, GNU Make, and a strict layered architecture.
 
-The `template` branch contains only reusable project infrastructure and neutral
-extension points. Complete applications belong in the `examples` branch.
+The template contains no peripheral example and no product logic. It boots,
+initializes the empty board and application hooks, then enters a super-loop
+that executes `application_process()` and `WFI`.
 
-## Project structure
-
-```text
-.
-├── app/
-│   ├── inc/app.h
-│   └── src/
-│       ├── app.c
-│       └── main.c
-├── bsp/
-│   ├── inc/bsp.h
-│   └── src/bsp.c
-├── drivers/
-│   ├── inc/.gitkeep
-│   └── src/.gitkeep
-├── lib/
-│   ├── inc/.gitkeep
-│   └── src/.gitkeep
-├── middleware/
-│   ├── inc/.gitkeep
-│   └── src/.gitkeep
-├── system/
-├── third_party/
-├── linker/
-├── scripts/
-├── docs/
-├── build/.gitkeep
-├── Makefile
-├── LICENSE
-└── .gitignore
-```
-
-## Core flow
+## Dependency direction
 
 ```text
-Reset_Handler
-    -> SystemInit()
-    -> main()
-        -> BSP_Init()
-        -> App_Init()
-        -> while (1)
-            -> App_Run()
+Application -> Services -> BSP / ECUAL -> SPL -> CMSIS -> Hardware
 ```
 
-Responsibilities:
+The `system/` directory is the composition root. Run `make check-layers` to
+reject forbidden include dependencies.
 
-- `main.c` owns only the top-level initialization order and super loop.
-- `bsp.c` initializes board-level resources.
-- `app.c` contains application policy and non-blocking processing.
-- `drivers/` contains reusable external-device drivers.
-- `lib/` contains hardware-independent utilities.
-- `middleware/` contains protocol stacks, RTOS ports, and file systems.
+## Vendor sources
 
-## Requirements
-
-Install GNU Make and the GNU Arm Embedded Toolchain so these commands are in
-`PATH`:
-
-```text
-arm-none-eabi-gcc
-arm-none-eabi-objcopy
-arm-none-eabi-size
-```
+Keep the repository's existing `third_party/CMSIS` and
+`third_party/STM32F10x_StdPeriph_Driver` directories. They are not duplicated
+inside this rewrite bundle.
 
 ## Build
 
@@ -77,66 +28,35 @@ arm-none-eabi-size
 make
 ```
 
-Generated files:
-
-```text
-build/firmware.elf # An example output filename is firmware
-build/firmware.hex
-build/firmware.bin
-build/firmware.map
-```
-
-To choose another output name:
-
-```bash
-make PROJECT=my_firmware
-```
-
-Remove generated files while preserving `build/.gitkeep`:
-
-```bash
-make clean
-```
-
-The Makefile intentionally exposes only the normal build and clean workflows.
-Flashing and debugging may be run with the scripts under `scripts/` or added by
-a concrete project when needed.
-
 ## Flash
-
-Flash the firmware with ST-Link and OpenOCD:
 
 ```bash
 make flash
 ```
 
-## Creating an example
+## Debug
 
-Clone the template branch and rename the directory:
+Terminal 1:
 
 ```bash
-git clone --branch template --single-branch \
-  git@github.com:haikevins/stm32f1-spl-procedural-baremetal.git \
-  02-example-name
+make debug-server
 ```
 
-Keep the base interfaces unchanged where possible:
+Terminal 2:
 
-```c
-void BSP_Init(void);
-void App_Init(void);
-void App_Run(void);
+```bash
+make debug
 ```
 
-Then add only the modules and implementation required by the example. A normal
-example should keep `main.c`, `app.h`, and `bsp.h` identical to the template.
+## Starting a project
 
-## Design rules
+Add modules in this order:
 
-- Keep `main.c` small and unchanged across projects.
-- Call `BSP_Init()` exactly once from `main()`.
-- Keep `App_Run()` non-blocking.
-- Put application decisions in `app/`, not in BSP or drivers.
-- Put board pin mappings and board peripheral setup in `bsp/`.
-- Do not commit generated files from `build/`.
-- Keep vendor code under `third_party/` unchanged.
+1. SPL source selection in `config/modules.mk`
+2. Board resources in `bsp/bluepill/`
+3. External-device drivers in `ecual/`
+4. Hardware-independent APIs in `services/`
+5. Product behavior in `app/`
+6. Initialization wiring in `system/system_init.c`
+
+See `docs/architecture.md` and `docs/adding_a_module.md`.

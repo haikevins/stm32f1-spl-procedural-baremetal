@@ -1,24 +1,24 @@
 # Build output
-build/*
-!build/.gitkeep
-
-# Dependency and analysis output
-*.o
-*.d
-*.su
+build/
 *.elf
-*.hex
 *.bin
+*.hex
 *.map
 *.lst
+*.o
+*.d
 
-# Editors and IDEs
+# IDE/editor
 .vscode/
 .idea/
+*.code-workspace
 *.swp
-*.swo
 *~
 
-# Operating-system metadata
+# OS files
 .DS_Store
 Thumbs.db
+
+# Debug logs
+openocd.log
+gdb.log
