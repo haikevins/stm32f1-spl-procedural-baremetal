@@ -8,7 +8,6 @@
 .global Reset_Handler
 
 .extern SystemInit
-.extern __libc_init_array
 .extern main
 
 .extern _sidata
