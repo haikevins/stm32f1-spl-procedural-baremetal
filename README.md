@@ -1,4 +1,4 @@
-# STM32F1 SPL Procedural Bare-Metal Template
+# STM32F1 SPL Procedural Bare-Metal Template 
 
 A reusable, buildable project skeleton for the **STM32F103C8T6 Blue Pill**, written in C11 and ARM assembly using **CMSIS**, the **STM32F10x Standard Peripheral Library (SPL)**, and **GNU Make**.
 
