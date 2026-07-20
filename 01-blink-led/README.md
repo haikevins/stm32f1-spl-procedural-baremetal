@@ -1,4 +1,4 @@
-# Example 01: Non-Blocking LED Blink
+# Example 01: LED Blink
 
 A layered STM32F103C8T6 Blue Pill example using CMSIS and the STM32F10x
 Standard Peripheral Library.
