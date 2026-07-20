@@ -4,7 +4,7 @@
 
 void system_idle(void)
 {
-    __NOP();
+    __WFI();
 }
 
 void system_panic(void)
@@ -13,6 +13,6 @@ void system_panic(void)
 
     for (;;)
     {
-        __NOP();
+        __WFI();
     }
 }
