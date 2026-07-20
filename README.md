@@ -1,115 +1,70 @@
-# STM32F1 SPL Procedural Bare-Metal Examples
+# STM32F1 SPL Procedural Bare-Metal Template
 
-A collection of self-contained examples for the **STM32F103C8T6 Blue Pill**, implemented in C11 and ARM assembly using **CMSIS**, the **STM32F10x Standard Peripheral Library (SPL)**, and **GNU Make**.
+A reusable, buildable project skeleton for the **STM32F103C8T6 Blue Pill**, written in C11 and ARM assembly using **CMSIS**, the **STM32F10x Standard Peripheral Library (SPL)**, and **GNU Make**.
 
-These examples are derived from the project skeleton maintained on the repository's `template` branch. Each directory is an independent firmware project with its own Makefile, startup code, linker script, layered architecture, vendor sources, and documentation.
+This branch is intended to be cloned as the starting point for new SPL-based bare-metal projects. It provides startup code, a linker script, the vector table, a small runtime, build and debug tooling, architecture boundaries, and empty application hooks while deliberately leaving peripheral examples and product behavior to the user.
 
-## Design Principles
+## Design Goals
 
-- Procedural bare-metal C
-- CMSIS for Cortex-M3 and STM32F103 device support
-- STM32F10x SPL for peripheral access
+- Procedural bare-metal development using CMSIS and STM32F10x SPL
 - No STM32 HAL, LL, libopencm3, Arduino Core, or RTOS
+- Clear separation between product logic and hardware-specific code
 - Strict downward dependencies between architecture layers
-- Non-blocking application logic whenever practical
-- Hardware-independent Application and Service interfaces
-- Independently buildable and flashable examples
+- Non-blocking super-loop application design
+- Small and understandable startup and runtime infrastructure
+- Reusable foundation for GPIO, UART, SPI, I2C, CAN, ADC, DMA, timers, and external-device projects
 
-## Available Examples
+## Target
 
-| Directory | Description | Main components |
-|---|---|---|
-| [`01-blink-led`](01-blink-led) | Non-blocking blink of the Blue Pill PC13 status LED | GPIO, SysTick, Time Service, Indication Service |
+| Item | Value |
+|---|---|
+| MCU | STM32F103C8T6 |
+| Board | STM32F103C8T6 Blue Pill |
+| CPU | Arm Cortex-M3 |
+| Flash | 64 KiB |
+| SRAM | 20 KiB |
+| Language | C11 and GNU assembler |
+| Peripheral library | STM32F10x Standard Peripheral Library |
+| Core/device support | CMSIS |
+| Build system | GNU Make |
+| Debug interface | SWD through ST-Link or another OpenOCD-compatible probe |
 
-Possible future examples can follow the same numbered convention:
+## What This Template Contains
 
-```text
-02-gpio-input-interrupt/
-03-uart-polling/
-04-uart-interrupt-ring-buffer/
-05-timer-pwm/
-06-spi-display/
-07-i2c-sensor/
-08-adc-dma/
-09-can-loopback/
-```
-
-## Clone the Examples Branch
-
-```bash
-git clone \
-    --branch examples \
-    --single-branch \
-    https://github.com/haikevins/stm32f1-spl-procedural-baremetal.git \
-    stm32f1-spl-examples
-
-cd stm32f1-spl-examples
-```
-
-## Build an Example
-
-Enter the example directory and run `make`:
-
-```bash
-cd 01-blink-led
-make
-```
-
-Generated files are written to the example's local `build/` directory:
+The default firmware performs only the minimum runtime sequence:
 
 ```text
-build/firmware.elf
-build/firmware.bin
-build/firmware.hex
-build/firmware.map
-build/firmware.lst
+Reset_Handler
+    |
+    v
+Initialize .data and .bss
+    |
+    v
+SystemInit()
+    |
+    v
+main()
+    |
+    v
+system_init()
+    |
+    +--> board_init()          // empty board hook
+    |
+    +--> application_init()    // empty application hook
+    |
+    v
+Super-loop
+    |
+    +--> application_process() // empty application hook
+    |
+    +--> system_idle()         // WFI
 ```
 
-Use a custom output name when needed:
+The template does not include a functional GPIO, SysTick, UART, communication protocol, external-device driver, or product application. Complete projects are maintained on the repository's `examples` branch.
 
-```bash
-make PROJECT=01-blink-led
-```
+## Layered Architecture
 
-Clean generated files:
-
-```bash
-make clean
-```
-
-## Flash
-
-Connect the Blue Pill to an ST-Link through SWD:
-
-```bash
-make flash
-```
-
-Erase the device:
-
-```bash
-make erase
-```
-
-## Debug
-
-Start OpenOCD in the first terminal:
-
-```bash
-make debug-server
-```
-
-Start GDB in a second terminal:
-
-```bash
-make debug
-```
-
-Depending on the local toolchain, the Makefile uses `arm-none-eabi-gdb` or `gdb-multiarch`.
-
-## Architecture
-
-Every example follows the same runtime dependency direction:
+Runtime dependencies must point downward:
 
 ```text
 Application
@@ -130,56 +85,243 @@ CMSIS
 STM32F103 Hardware
 ```
 
-The `system/` directory is the composition root. It connects modules and controls initialization, but it must not contain product behavior.
+The `system/` directory is the **composition root**. It may initialize and connect modules from multiple layers, but it must not contain product behavior.
 
-Each project includes an architecture checker:
+Startup files, linker scripts, project configuration, vendor code, and development tools are infrastructure rather than runtime application layers.
+
+### Layer Responsibilities
+
+| Layer | Responsibility |
+|---|---|
+| Application | Product policy, state machines, and non-blocking application behavior |
+| Services | Hardware-independent capabilities such as time, indications, communication, diagnostics, scheduling, and events |
+| BSP | Mapping logical board resources to physical MCU pins and peripherals |
+| ECU Abstraction | Drivers for external displays, sensors, memories, transceivers, and other off-chip devices |
+| Common | Portable data types and utilities such as CRC, fixed-size queues, ring buffers, and bit helpers |
+| System | Initialization order, module composition, super-loop control, idle behavior, and fatal-error policy |
+| SPL | Vendor peripheral drivers used as the low-level peripheral layer |
+| CMSIS | Cortex-M3 core support and STM32F103 device definitions |
+
+### Dependency Rules
+
+| Layer | May depend on | Must not depend on |
+|---|---|---|
+| Application | Services and portable Common APIs | BSP, ECUAL, SPL, CMSIS, or STM32 device headers |
+| Services | BSP, ECUAL, and portable Common APIs | Application or raw STM32/SPL headers |
+| BSP | SPL, CMSIS, and portable Common APIs | Services or Application |
+| ECUAL | Preferably BSP bus APIs and portable Common APIs | Services or Application |
+| Common | Standard language headers | Hardware-specific modules |
+| System | Public APIs from all runtime layers | Product behavior |
+| SPL / CMSIS | Vendor and architecture definitions | Upper project layers |
+
+Run the dependency checker with:
 
 ```bash
 make check-layers
 ```
 
-Application code must not bypass Services by directly including BSP, SPL, CMSIS, or STM32 device headers.
+The checker rejects forbidden project-header dependencies before the firmware is compiled.
 
-## Creating a New Example
+## Repository Layout
 
-Use the `template` branch as the clean starting point instead of copying unrelated example behavior:
+```text
+.
+├── app/                         Product behavior and state machines
+├── services/                    Hardware-independent services
+├── ecual/                       External-device drivers
+├── bsp/bluepill/                Blue Pill board abstraction
+├── common/                      Portable utilities and shared types
+├── config/                      Project and module configuration
+├── system/                      Composition root and main super-loop
+├── platform/                    Platform-level helpers
+├── runtime/                     Minimal C runtime support
+├── startup/                     Reset handler and vector table
+├── linker/                      STM32F103C8T6 linker script
+├── third_party/
+│   ├── CMSIS/                   Cortex-M3 and STM32 device support
+│   └── STM32F10x_StdPeriph_Driver/
+├── tests/host/                  Host-side tests
+├── tools/
+│   ├── gdb/                     GDB command files
+│   ├── openocd/                 OpenOCD configuration
+│   └── scripts/                 Architecture and utility scripts
+├── docs/                        Architecture and development guides
+├── Makefile
+└── README.md
+```
+
+## Prerequisites
+
+Install the following tools:
+
+- GNU Arm Embedded Toolchain:
+  - `arm-none-eabi-gcc`
+  - `arm-none-eabi-objcopy`
+  - `arm-none-eabi-objdump`
+  - `arm-none-eabi-size`
+- GNU Make
+- Python 3
+- OpenOCD
+- `arm-none-eabi-gdb` or `gdb-multiarch`
+- ST-Link or another OpenOCD-compatible SWD probe
+
+Verify the main tools:
+
+```bash
+arm-none-eabi-gcc --version
+make --version
+python3 --version
+openocd --version
+```
+
+## Clone the Template Branch
 
 ```bash
 git clone \
     --branch template \
     --single-branch \
     https://github.com/haikevins/stm32f1-spl-procedural-baremetal.git \
-    02-my-example
+    my-stm32-project
+
+cd my-stm32-project
 ```
 
-Then:
-
-1. Remove the cloned `.git` directory if the new project will be committed inside the `examples` branch.
-2. Select only the required SPL implementation files in `config/modules.mk`.
-3. Add board-specific resources to `bsp/bluepill/`.
-4. Add external-device drivers to `ecual/` when required.
-5. Add hardware-independent Services.
-6. Implement the example behavior in the Application layer.
-7. Connect initialization in `system/system_init.c`.
-8. Document hardware wiring, configuration, and expected behavior in the example README.
-9. Run `make check-layers` and `make` before committing.
-
-Example preparation:
+To start a completely independent repository:
 
 ```bash
-rm -rf 02-my-example/.git
+rm -rf .git
+git init
+git add .
+git commit -m "chore: initialize STM32F103 SPL bare-metal project"
 ```
 
-## Prerequisites
+## Build
 
-- GNU Arm Embedded Toolchain
-- GNU Make
-- Python 3
-- OpenOCD
-- `arm-none-eabi-gdb` or `gdb-multiarch`
-- ST-Link or another OpenOCD-compatible SWD probe
-- STM32F103C8T6 Blue Pill board
+```bash
+make
+```
+
+Generated files:
+
+```text
+build/firmware.elf
+build/firmware.bin
+build/firmware.hex
+build/firmware.map
+build/firmware.lst
+```
+
+Use a custom firmware name without editing the Makefile:
+
+```bash
+make PROJECT=my_firmware
+```
+
+Useful targets:
+
+```bash
+make check-layers   # Verify architecture dependencies
+make size           # Display firmware section sizes
+make tree           # Display the project structure
+make clean          # Remove generated files
+```
+
+## Flash
+
+Connect the Blue Pill to an ST-Link through SWD, then run:
+
+```bash
+make flash
+```
+
+Erase the device:
+
+```bash
+make erase
+```
+
+The default OpenOCD configuration is located at:
+
+```text
+tools/openocd/bluepill_stlink.cfg
+```
+
+## Debug
+
+Start OpenOCD in the first terminal:
+
+```bash
+make debug-server
+```
+
+Start GDB in a second terminal:
+
+```bash
+make debug
+```
+
+The Makefile uses `arm-none-eabi-gdb` when available and falls back to `gdb-multiarch`.
+
+## Starting a New Project
+
+A recommended implementation sequence is:
+
+1. Define project-wide settings in `config/`.
+2. Select the required SPL source files in `config/modules.mk`.
+3. Add board resources in `bsp/bluepill/`.
+4. Add external-device drivers in `ecual/`.
+5. Add hardware-independent APIs in `services/`.
+6. Implement product behavior in `app/`.
+7. Connect module initialization in `system/system_init.c`.
+8. Keep interrupt handlers in the lowest layer that owns the hardware resource.
+9. Keep super-loop processing non-blocking.
+10. Run `make check-layers` and `make` before committing.
+
+### Module Placement
+
+| Responsibility | Recommended location |
+|---|---|
+| Product state machine | `app/` |
+| Time, events, indications, protocol, diagnostics | `services/` |
+| Onboard LED, button, console, board timebase | `bsp/bluepill/` |
+| External display, sensor, EEPROM, transceiver | `ecual/` |
+| CRC, ring buffer, fixed-size queue | `common/` |
+| Initialization wiring | `system/system_init.c` |
+| Required SPL implementation sources | `config/modules.mk` |
+
+A typical module should expose its public interface from an `include/` directory and keep implementation details in a `src/` directory.
+
+## Interrupt Policy
+
+An interrupt handler may:
+
+- Read and acknowledge peripheral flags
+- Transfer data into a statically allocated low-level buffer
+- Update a low-level counter or status flag
+- Wake normal thread-mode processing through a flag or queue
+
+An interrupt handler must not:
+
+- Include Application headers
+- Run application state machines
+- Parse high-level protocols
+- Block or perform lengthy processing
+- Call upward into Services or Application
+
+Upper layers should consume interrupt-produced data through normal APIs during thread-mode execution.
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — layer responsibilities and dependency direction
+- [`docs/adding_a_module.md`](docs/adding_a_module.md) — recommended procedure for adding modules
+
+## Branches
+
+| Branch | Purpose |
+|---|---|
+| `template` | Reusable project skeleton without peripheral examples |
+| `examples` | Complete, independently buildable demonstration projects |
 
 ## License
 
-The examples are distributed under the MIT License. Refer to the `LICENSE` file inside each example where applicable.
+This project is distributed under the MIT License. See [`LICENSE`](LICENSE).
