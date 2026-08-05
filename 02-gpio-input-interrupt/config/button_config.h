@@ -1,0 +1,6 @@
+#ifndef BUTTON_CONFIG_H
+#define BUTTON_CONFIG_H
+
+#define BUTTON_DEBOUNCE_TIME_MS (30UL)
+
+#endif /* BUTTON_CONFIG_H */
