@@ -1,0 +1,6 @@
+#ifndef BOARD_CONFIG_H
+#define BOARD_CONFIG_H
+
+#define BOARD_UART_BAUD_RATE (115200UL)
+
+#endif /* BOARD_CONFIG_H */
