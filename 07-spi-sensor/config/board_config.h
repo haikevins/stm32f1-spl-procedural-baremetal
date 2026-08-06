@@ -1,0 +1,9 @@
+#ifndef BOARD_CONFIG_H
+#define BOARD_CONFIG_H
+
+#define BOARD_TIMEBASE_HZ                 (1000UL)
+#define BOARD_SENSOR_SPI_MAX_HZ           (8000000UL)
+#define BOARD_SENSOR_SPI_TIMEOUT_MS       (20UL)
+#define BOARD_SENSOR_POWER_ON_DELAY_MS    (100UL)
+
+#endif /* BOARD_CONFIG_H */
