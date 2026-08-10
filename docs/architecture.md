@@ -386,15 +386,15 @@ Architecture review and hardware testing are still required.
 
 ## 24. Architectural Acceptance Checklist
 
-- [ ] Application has no BSP/SPL/CMSIS includes.
-- [ ] Services contain no raw peripheral calls.
-- [ ] BSP owns physical board mapping.
-- [ ] ECUAL owns external-device protocol.
-- [ ] SPL/CMSIS remain below upper layers.
-- [ ] ISR belongs to the lowest owner.
-- [ ] ISR work is bounded.
-- [ ] thread handoff is explicit.
-- [ ] shared state has clear ownership.
-- [ ] clock conversions occur below Application.
-- [ ] errors/overflows are observable.
-- [ ] `make check-layers` passes.
+-  Application has no BSP/SPL/CMSIS includes.
+-  Services contain no raw peripheral calls.
+-  BSP owns physical board mapping.
+-  ECUAL owns external-device protocol.
+-  SPL/CMSIS remain below upper layers.
+-  ISR belongs to the lowest owner.
+-  ISR work is bounded.
+-  thread handoff is explicit.
+-  shared state has clear ownership.
+-  clock conversions occur below Application.
+-  errors/overflows are observable.
+-  `make check-layers` passes.

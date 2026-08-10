@@ -247,14 +247,14 @@ make size
 
 ## 20. Port Acceptance Checklist
 
-- [ ] Linker matches memory.
-- [ ] Startup matches vector table.
-- [ ] Clock tree validated.
-- [ ] BSP pins validated.
-- [ ] SPL source list validated.
-- [ ] Interrupt names/priorities validated.
-- [ ] DMA mapping validated if used.
-- [ ] OpenOCD can connect.
-- [ ] Layer checker passes.
-- [ ] Clean build passes.
-- [ ] Hardware test reproduces expected behavior.
+-  Linker matches memory.
+-  Startup matches vector table.
+-  Clock tree validated.
+-  BSP pins validated.
+-  SPL source list validated.
+-  Interrupt names/priorities validated.
+-  DMA mapping validated if used.
+-  OpenOCD can connect.
+-  Layer checker passes.
+-  Clean build passes.
+-  Hardware test reproduces expected behavior.

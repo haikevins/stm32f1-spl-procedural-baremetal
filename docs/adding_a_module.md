@@ -371,21 +371,21 @@ Bring the system up from bottom to top:
 
 ## 31. Module Addition Checklist
 
-- [ ] requirement defined;
-- [ ] correct layer selected;
-- [ ] SPL source added;
-- [ ] BSP mapping added;
-- [ ] peripheral clock verified;
-- [ ] GPIO electrical mode correct;
-- [ ] polling bounded;
-- [ ] IRQ ownership correct;
-- [ ] shared state safe;
-- [ ] Service API hardware-independent;
-- [ ] Application has no lower-layer include;
-- [ ] debug state available;
-- [ ] README updated;
-- [ ] architecture updated;
-- [ ] porting guide updated;
-- [ ] layer checker passes;
-- [ ] clean build succeeds;
-- [ ] hardware test passes.
+-  requirement defined;
+-  correct layer selected;
+-  SPL source added;
+-  BSP mapping added;
+-  peripheral clock verified;
+-  GPIO electrical mode correct;
+-  polling bounded;
+-  IRQ ownership correct;
+-  shared state safe;
+-  Service API hardware-independent;
+-  Application has no lower-layer include;
+-  debug state available;
+-  README updated;
+-  architecture updated;
+-  porting guide updated;
+-  layer checker passes;
+-  clean build succeeds;
+-  hardware test passes.
