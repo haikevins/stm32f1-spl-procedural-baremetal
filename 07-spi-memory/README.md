@@ -1,77 +1,189 @@
-# 07 - SPI Memory: W25Q64
+# 07 - SPI W25Q64 Memory
 
-This example replaces the previous SPI sensor example with a Winbond W25Q64
-Serial NOR Flash demo using STM32F103 SPI1 and the Standard Peripheral Library.
+## Purpose
 
-## Wiring
+Communicate with a W25Q64-compatible 64-Mbit SPI NOR device, read JEDEC ID, erase a sector, program one page fragment, read it back, and verify data.
 
-For the common six-pin W25Q64 module labeled `D1 CLK GND D0 CS VCC`:
+This project is independently buildable and uses the same layered architecture
+as the rest of the repository.
 
-| Blue Pill | W25Q64 module | Meaning |
-|---|---|---|
-| 3.3V | VCC | 3.3 V supply |
-| GND | GND | common ground |
-| PA5 | CLK | SPI1 SCK |
-| PA6 | D1 | flash DO / IO1 -> MCU MISO |
-| PA7 | D0 | flash DI / IO0 <- MCU MOSI |
-| PA4 | CS | active-low chip select |
+## Learning Goals
 
-If your board silkscreen appears to say `VCO`, verify it carefully; the
-Winbond flash device supply pin is named `VCC`.
+By the end of this example, you should be able to:
 
-Do not power the flash or SPI signals from 5 V.
+- trace initialization from `main()` through System, BSP, Services, and
+  Application;
+- identify which layer owns each physical peripheral;
+- explain the runtime data/control flow;
+- distinguish ISR work from thread-mode work where interrupts are used;
+- modify compile-time configuration without violating dependency direction;
+- debug the example from the hardware layer upward.
 
-## SPI configuration
+## Hardware and Wiring
 
-- SPI1
-- mode 0 (CPOL=0, CPHA=0)
-- MSB first
-- 8-bit full duplex
-- software chip select on PA4
-- configured maximum: 5 MHz
-- normal 72 MHz PCLK2 results in 4.5 MHz SPI
 
-## Driver operations
+Wire the six-pin module:
 
-The ECUAL driver implements:
+```text
+STM32F103C8T6       W25Q64
+--------------------------------
+3.3V        ------  VCC
+GND         ------  GND
+PA4         ------  CS
+PA5         ------  CLK
+PA6         ------  D1 / DO / MISO
+PA7         ------  D0 / DI / MOSI
+```
 
-- `0x9F` - JEDEC ID
-- `0x05` - Status Register-1
-- `0x06` - Write Enable
-- `0x03` - Read Data
-- `0x02` - Page Program
-- `0x20` - 4 KiB Sector Erase
+Use 3.3 V supply and logic.
 
-The driver checks WEL after Write Enable and polls BUSY after page program or
-sector erase. A page-program request is rejected if it crosses a 256-byte
-page boundary.
 
-W25Q64 uses an 8 MiB address space and 24-bit addresses.
+## Compile-Time Configuration
 
-## Destructive demo
 
-**Warning:** every reset erases the final 4 KiB sector:
+| Setting | Value |
+|---|---|
+| SPI | SPI1 |
+| CS | PA4 |
+| SCK | PA5 |
+| MISO | PA6 |
+| MOSI | PA7 |
+| SPI mode | 0 |
+| Maximum requested SPI clock | 5 MHz |
+| SPI polling timeout | 20 ms |
+| Power-on delay | 10 ms |
+| Page-program timeout | 50 ms |
+| Sector-erase timeout | 2000 ms |
+| Test sector | 0x007FF000 |
+| Test length | 32 bytes |
+| Heartbeat | 500 ms |
+
+With the normal 72 MHz PCLK2, the BSP selects `/16`, producing 4.5 MHz.
+
+
+## Initialization Sequence
+
+
+```text
+board_init()
+    |
+    +--> board_timebase_init()
+    +--> board_led_init()
+    +--> board_memory_bus_init()
+    |      +--> CS output HIGH
+    |      +--> PA5/PA7 AF push-pull
+    |      +--> PA6 floating input
+    |      +--> select SPI prescaler
+    |      +--> SPI1 mode 0
+    |
+    +--> 10 ms power-on delay
+
+memory_service_init()
+    |
+    +--> w25q64_init()
+            |
+            +--> wait BUSY clear
+            +--> command 0x9F
+            +--> read 3-byte JEDEC ID
+```
+
+The driver requires manufacturer `0xEF` and capacity code `0x17`. It records
+the memory-type byte but deliberately does not require one exact type value.
+
+
+## Runtime Behavior
+
+
+The destructive startup test uses the final 4 KiB sector:
 
 ```text
 0x007FF000 .. 0x007FFFFF
 ```
 
-The example then programs 32 bytes at `0x007FF000`, reads them back, and
-compares every byte.
+Sequence:
 
-This leaves the beginning of the flash untouched, but the final sector must be
-considered reserved for this example.
+```text
+JEDEC ID
+   |
+Sector Erase 0x20
+   |
+Write Enable + poll WEL
+   |
+poll BUSY until erase complete
+   |
+Page Program 0x02, 32 bytes
+   |
+poll BUSY
+   |
+Read Data 0x03
+   |
+byte-for-byte verify
+```
 
-## LED behavior
+If the test passes, PC13 toggles every 500 ms. If a memory operation or
+verification fails after initialization, the Application keeps PC13 steadily
+ON.
 
-- successful erase/program/verify: PC13 toggles every 500 ms
-- test failure after a valid JEDEC initialization: PC13 stays ON
-- board or JEDEC initialization failure: firmware enters `system_panic()`
 
-`system_idle()` remains `__NOP()` to preserve reliable SWD re-attachment with
-ST-Link adapters that do not expose NRST.
+## SPL / Low-Level Behavior
 
-## GDB variables
+
+The SPI BSP is polling. For every byte it:
+
+1. waits for TXE;
+2. writes the transmit byte or `0xFF` dummy byte;
+3. waits for RXNE;
+4. reads the received byte;
+5. after the transfer, waits for BSY to clear.
+
+Chip select is controlled explicitly by GPIO around each command transaction.
+
+The ECUAL validates address range and rejects Page Program operations that
+cross a 256-byte page boundary.
+
+
+## Architectural Notes
+
+
+The Memory Service hides the concrete W25Q64 device from Application. The ECUAL
+owns NOR command semantics. The BSP owns SPI1 and CS pin transactions. This
+keeps board wiring and flash protocol concerns separate.
+
+
+## Interrupt and Concurrency Policy
+
+The project follows the repository-wide rule that an interrupt handler belongs
+to the lowest module that owns the peripheral. The ISR, when present, may clear
+flags, transfer low-level data, and record bounded state. Higher-level policy is
+processed later in normal thread mode.
+
+`system_idle()` in this concrete example executes `__NOP()` rather than
+`__WFI()`.
+
+## Test Procedure and Expected Result
+
+
+**Warning:** every reset erases the last 4 KiB sector. Do not store important
+data there while running this demo.
+
+After flashing:
+
+- valid JEDEC identification + passing erase/program/read-back test -> PC13
+  toggles every 500 ms;
+- erase/program/read-back/verify failure after successful device
+  identification -> PC13 stays ON;
+- JEDEC/device initialization failure -> `system_init()` fails and the firmware
+  enters `system_panic()`, so use GDB to diagnose that earlier failure.
+
+The most useful first debug check is JEDEC ID. For a common W25Q64 module the
+observed bytes are typically `EF 40 17`; the source formally validates `EF` and
+capacity `17`.
+
+
+## GDB Debugging
+
+
+Application exports diagnostics intentionally:
 
 ```gdb
 p/x application_memory_manufacturer_id
@@ -83,39 +195,117 @@ p application_memory_erase_ok
 p application_memory_program_ok
 p application_memory_verify_ok
 p application_memory_test_passed
-p application_memory_error_count
 
+p application_memory_error_count
+p/x application_memory_first_mismatch_index
 p/x application_memory_readback_first_byte
 p/x application_memory_readback_last_byte
-p/x application_memory_first_mismatch_index
 ```
 
-For a Winbond W25Q64, the manufacturer byte should be `0xEF`. The example also
-expects the 64-Mbit capacity code used by this device family.
-
-## Architecture
+Expected successful test address:
 
 ```text
-Application
-    |
-    v
-Memory Service
-    |
-    v
-W25Q64 ECUAL
-    |
-    v
-Board Memory Bus
-    |
-    v
-GPIO / SPI1
+0x007FF000
 ```
 
-## Build
+
+
+## Build, Flash, and Debug
+
+Run the commands from the example directory.
 
 ```bash
 make check-layers
 make clean
 make
+```
+
+The build produces:
+
+```text
+build/firmware.elf
+build/firmware.hex
+build/firmware.bin
+build/firmware.lst
+build/firmware.map
+```
+
+Flash with OpenOCD:
+
+```bash
 make flash
 ```
+
+Erase the MCU flash if needed:
+
+```bash
+make erase
+```
+
+Start an OpenOCD debug server:
+
+```bash
+make debug-server
+```
+
+Then, in another terminal:
+
+```bash
+make debug
+```
+
+The Makefile prefers `arm-none-eabi-gdb` and falls back to `gdb-multiarch`.
+
+The OpenOCD configuration uses SWD and:
+
+```tcl
+reset_config none
+adapter speed 1000
+```
+
+This matches a common ST-Link connection where only `SWDIO`, `SWCLK`, `GND`,
+and `3.3V` are connected and NRST is not available.
+
+
+## Troubleshooting Method
+
+Use a bottom-up approach:
+
+1. verify power and wiring;
+2. verify BSP pin/peripheral mapping;
+3. verify the peripheral clock is enabled;
+4. verify initialization succeeds;
+5. verify the low-level peripheral flag/interrupt/data path;
+6. verify Service state;
+7. verify Application policy.
+
+Do not immediately modify Application code when the underlying peripheral is
+not yet proven to work.
+
+## Porting Notes
+
+
+To use another SPI instance, update SCK/MISO/MOSI/CS mapping and the APB clock
+used for prescaler selection. To support another NOR geometry, review size,
+page size, sector size, JEDEC validation, address width, command set, and
+timeouts together.
+
+
+See [`docs/porting_guide.md`](docs/porting_guide.md) for a structured checklist.
+
+## Further Exercises
+
+Good next experiments include:
+
+- expose additional diagnostic counters through GDB;
+- add a second logical Service without letting Application include BSP headers;
+- deliberately inject a failure and trace how it propagates;
+- write a host-side test for portable Common or Service logic;
+- change one board resource and verify that Application does not need hardware
+  includes.
+
+## Related Documentation
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/adding_a_module.md`](docs/adding_a_module.md)
+- [`docs/porting_guide.md`](docs/porting_guide.md)

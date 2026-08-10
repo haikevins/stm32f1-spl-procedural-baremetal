@@ -1,115 +1,100 @@
-﻿# STM32F1 SPL Procedural Bare-Metal Examples
+# STM32F103 SPL Procedural Bare-Metal Examples
 
-A collection of self-contained examples for the **STM32F103C8T6 Blue Pill**, implemented in C11 and ARM assembly using **CMSIS**, the **STM32F10x Standard Peripheral Library (SPL)**, and **GNU Make**.
+This directory contains eight independent firmware projects. Each project is
+designed to teach one additional embedded concept while preserving the same
+layered architecture and super-loop model.
 
-These examples are derived from the project skeleton maintained on the repository's `template` branch. Each directory is an independent firmware project with its own Makefile, startup code, linker script, layered architecture, vendor sources, and documentation.
+## Roadmap
 
-## Design Principles
+| # | Directory | Peripheral / device | Main technique |
+|---|---|---|---|
+| 01 | `01-blink-led` | PC13 GPIO + SysTick | periodic non-blocking task |
+| 02 | `02-gpio-input-interrupt` | PA0 EXTI0 + PC13 | ISR event capture + debounce |
+| 03 | `03-uart-polling` | USART1 PA9/PA10 | non-blocking polling |
+| 04 | `04-uart-interrupt-ring-buffer` | USART1 PA9/PA10 | IRQ-driven RX/TX rings |
+| 05 | `05-timer-pwm` | TIM2_CH1 PA0 | hardware PWM |
+| 06 | `06-i2c-display` | I2C1 PB6/PB7 + SSD1306 | external display driver |
+| 07 | `07-spi-memory` | SPI1 PA4..PA7 + W25Q64 | NOR flash transactions |
+| 08 | `08-adc-dma` | ADC1_IN0 + TIM3 + DMA1 CH1 | periodic sampled-data pipeline |
 
-- Procedural bare-metal C
-- CMSIS for Cortex-M3 and STM32F103 device support
-- STM32F10x SPL for peripheral access
-- No STM32 HAL, LL, libopencm3, Arduino Core, or RTOS
-- Strict downward dependencies between architecture layers
-- Non-blocking application logic whenever practical
-- Hardware-independent Application and Service interfaces
-- Independently buildable and flashable examples
+## Hardware Summary
 
-## Available Examples
+### Example 01
 
-| Directory | Description | Main components |
-|---|---|---|
-| [`01-blink-led`](01-blink-led) | Non-blocking blink of the Blue Pill PC13 status LED | GPIO, SysTick, Time Service, Indication Service |
-| [`02-gpio-input-interrupt`](02-gpio-input-interrupt) | Toggle PC13 from a debounced PA0 EXTI interrupt | GPIO, AFIO, EXTI, SysTick, Button Service |
+Uses only the onboard PC13 LED.
 
-Possible future examples can follow the same numbered convention:
-
-```text
-03-uart-polling/
-04-uart-interrupt-ring-buffer/
-05-timer-pwm/
-06-spi-display/
-07-i2c-sensor/
-08-adc-dma/
-09-can-loopback/
-```
-
-## Clone the Examples Branch
-
-```bash
-git clone \
-    --branch examples \
-    --single-branch \
-    https://github.com/haikevins/stm32f1-spl-procedural-baremetal.git \
-    stm32f1-spl-examples
-
-cd stm32f1-spl-examples
-```
-
-## Build an Example
-
-Enter the example directory and run `make`:
-
-```bash
-cd 02-gpio-input-interrupt
-make
-```
-
-Generated files are written to the example's local `build/` directory:
+### Example 02
 
 ```text
-build/firmware.elf
-build/firmware.bin
-build/firmware.hex
-build/firmware.map
-build/firmware.lst
+PA0 ---- push button ---- GND
 ```
 
-Use a custom output name when needed:
+PA0 uses the internal pull-up, so a press is active-low and produces a falling
+edge.
 
-```bash
-make PROJECT=01-blink-led
+### Examples 03 and 04
+
+```text
+Blue Pill PA9  USART1_TX  ---> USB-UART RX
+Blue Pill PA10 USART1_RX  <--- USB-UART TX
+Blue Pill GND              --- USB-UART GND
 ```
 
-Clean generated files:
+Use a 3.3 V UART adapter and `115200 8N1`, no flow control.
 
-```bash
-make clean
+### Example 05
+
+```text
+PA0 / TIM2_CH1 ---- current-limiting resistor ---- LED ---- GND
 ```
 
-## Flash
+A 330-ohm resistor is a typical breadboard choice.
 
-Connect the Blue Pill to an ST-Link through SWD:
+### Example 06
 
-```bash
-make flash
+```text
+Blue Pill      SSD1306 I2C module
+---------------------------------
+GND        ---> GND
+3.3V       ---> VCC
+PB6        ---> SCL
+PB7        ---> SDA
 ```
 
-Erase the device:
+The default address is `0x3C`. Modules without onboard pull-ups require
+external SCL/SDA pull-ups to 3.3 V.
 
-```bash
-make erase
+### Example 07
+
+```text
+STM32F103C8T6       W25Q64
+--------------------------------
+3.3V        ------  VCC
+GND         ------  GND
+PA4         ------  CS
+PA5         ------  CLK
+PA6         ------  D1 / DO / MISO
+PA7         ------  D0 / DI / MOSI
 ```
 
-## Debug
+The demo erases the last 4 KiB sector on every reset.
 
-Start OpenOCD in the first terminal:
+### Example 08
 
-```bash
-make debug-server
+```text
+3.3V ---- potentiometer ---- GND
+                  |
+                  +---- PA0 / ADC1_IN0
 ```
 
-Start GDB in a second terminal:
+Keep PA0 within the board analog supply range.
 
-```bash
-make debug
-```
+## Common Software Architecture
 
-Depending on the local toolchain, the Makefile uses `arm-none-eabi-gdb` or `gdb-multiarch`.
 
-## Architecture
+## Repository Layer Rules
 
-Every example follows the same runtime dependency direction:
+The project enforces a downward dependency direction:
 
 ```text
 Application
@@ -117,69 +102,135 @@ Application
     v
 Services
     |
-    v
-BSP / ECU Abstraction
+    +------> BSP
     |
-    v
-STM32F10x Standard Peripheral Library
-    |
-    v
-CMSIS
-    |
-    v
-STM32F103 Hardware
+    +------> ECU Abstraction
+                  |
+                  v
+         Board bus interfaces
+                  |
+                  v
+       STM32F10x SPL / CMSIS
+                  |
+                  v
+          STM32F103 hardware
 ```
 
-The `system/` directory is the composition root. It connects modules and controls initialization, but it must not contain product behavior.
+`system/` is the composition root. It is allowed to connect modules from
+multiple layers, but product behavior belongs in `app/`.
 
-Each project includes an architecture checker:
+Important rules:
+
+- Application must not include BSP, ECUAL, SPL, CMSIS, or raw STM32 headers.
+- Services expose hardware-independent behavior and may depend on BSP/ECUAL.
+- BSP owns physical pins, MCU peripheral mapping, and low-level interrupt
+  handlers for board resources.
+- ECUAL contains external-device drivers and should communicate through BSP
+  bus APIs rather than STM32 peripheral APIs.
+- ISRs must remain in the lowest layer that owns the interrupt source.
+- An ISR may acknowledge flags, move bytes/samples, and record low-level
+  events; it must not call Application state machines or perform blocking work.
+- `make check-layers` validates project-header dependencies before compilation.
+
+
+## Super-Loop Style
+
+Application processing is cooperative:
+
+```text
+for (;;)
+    |
+    +--> application_process()
+    |
+    +--> system_idle()
+```
+
+No example allocates memory dynamically.
+
+Long-running behavior is split into bounded pieces:
+
+- UART polling sends/receives only when the hardware is ready.
+- Button debounce waits by comparing timestamps, not by delaying.
+- UART interrupt mode uses ring buffers.
+- PWM is generated by TIM2 hardware.
+- SSD1306 updates use bounded I2C polling.
+- W25Q64 internal operations are polled with timeouts.
+- ADC acquisition runs through TIM3 + DMA while statistics run in thread mode.
+
+## Common Build Commands
+
+From any example directory:
 
 ```bash
 make check-layers
+make clean
+make
+make flash
 ```
 
-Application code must not bypass Services by directly including BSP, SPL, CMSIS, or STM32 device headers.
-
-## Creating a New Example
-
-Use the `template` branch as the clean starting point instead of copying unrelated example behavior:
+Useful commands:
 
 ```bash
-git clone \
-    --branch template \
-    --single-branch \
-    https://github.com/haikevins/stm32f1-spl-procedural-baremetal.git \
-    02-my-example
+make size
+make tree
+make debug-server
+make debug
+make erase
 ```
 
-Then:
+## How to Compare Examples
 
-1. Remove the cloned `.git` directory if the new project will be committed inside the `examples` branch.
-2. Select only the required SPL implementation files in `config/modules.mk`.
-3. Add board-specific resources to `bsp/bluepill/`.
-4. Add external-device drivers to `ecual/` when required.
-5. Add hardware-independent Services.
-6. Implement the example behavior in the Application layer.
-7. Connect initialization in `system/system_init.c`.
-8. Document hardware wiring, configuration, and expected behavior in the example README.
-9. Run `make check-layers` and `make` before committing.
+A useful study method is to diff adjacent examples.
 
-Example preparation:
+### 03 vs 04: UART
 
-```bash
-rm -rf 02-my-example/.git
+Example 03 polls `RXNE`/`TXE` from thread mode. Example 04 moves byte transfer
+into `USART1_IRQHandler()` and exposes ring-buffer-backed APIs to the same
+application-facing layer.
+
+### 05 vs 01: Timing
+
+Example 01 uses SysTick for application scheduling and software toggling.
+Example 05 still uses SysTick for scheduling, but waveform generation is moved
+to TIM2 hardware PWM.
+
+### 06 vs 07: External devices
+
+Both examples separate:
+
+```text
+Application -> Service -> ECUAL -> board bus -> SPL
 ```
 
-## Prerequisites
+The difference is the bus and device protocol: SSD1306/I2C vs W25Q64/SPI.
 
-- GNU Arm Embedded Toolchain
-- GNU Make
-- Python 3
-- OpenOCD
-- `arm-none-eabi-gdb` or `gdb-multiarch`
-- ST-Link or another OpenOCD-compatible SWD probe
-- STM32F103C8T6 Blue Pill board
+### 08: Data acquisition
 
-## License
+Example 08 introduces a continuous producer:
 
-The examples are distributed under the MIT License. Refer to the `LICENSE` file inside each example where applicable.
+```text
+TIM3 -> ADC1 -> DMA
+```
+
+The DMA ISR only publishes completed sample blocks. Statistical processing and
+LED policy remain in normal thread mode.
+
+## Debugging Strategy
+
+When hardware behavior is wrong, debug from the bottom upward:
+
+1. verify power and wiring;
+2. verify the board pin mapping;
+3. stop in board initialization;
+4. inspect peripheral status/flags;
+5. verify low-level data movement;
+6. verify Service state;
+7. verify Application policy.
+
+For interrupt examples, first prove that the ISR is firing and clearing the
+correct flag before debugging higher-level behavior.
+
+## Recommended Order
+
+Study and run the examples in numerical order. The sequence is designed so each
+project adds one new concept without changing the overall architecture.

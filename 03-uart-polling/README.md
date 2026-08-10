@@ -1,147 +1,287 @@
-# Example 03: UART Polling
+# 03 - UART Polling
 
-A layered STM32F103C8T6 Blue Pill example using CMSIS and the STM32F10x
-Standard Peripheral Library.
+## Purpose
 
-USART1 is configured for 115200 baud, 8 data bits, no parity, and one stop
-bit. The firmware sends a startup message and echoes every received byte.
-Both receive and transmit paths use non-blocking polling; UART interrupts and
-DMA are not enabled.
+Configure USART1 at 115200 8N1 and implement a cooperative polling echo without interrupts, DMA, blocking delays, or unbounded waits.
 
-## Hardware wiring
+This project is independently buildable and uses the same layered architecture
+as the rest of the repository.
 
-Use a 3.3 V USB-to-UART adapter.
+## Learning Goals
 
-```text
-Blue Pill PA9  (USART1_TX) ---- USB-to-UART RX
-Blue Pill PA10 (USART1_RX) ---- USB-to-UART TX
-Blue Pill GND                 ---- USB-to-UART GND
-```
+By the end of this example, you should be able to:
 
-Do not connect 5 V logic signals to PA9 or PA10. A basic ST-Link V2 clone is
-a debug probe and normally does not provide a USB virtual COM port, so a
-separate USB-to-UART adapter is required.
+- trace initialization from `main()` through System, BSP, Services, and
+  Application;
+- identify which layer owns each physical peripheral;
+- explain the runtime data/control flow;
+- distinguish ISR work from thread-mode work where interrupts are used;
+- modify compile-time configuration without violating dependency direction;
+- debug the example from the hardware layer upward.
 
-| Resource | Configuration |
-|---|---|
-| Peripheral | USART1 |
-| TX | PA9, alternate-function push-pull |
-| RX | PA10, floating input |
-| Baud rate | 115200 |
-| Frame | 8 data bits, no parity, 1 stop bit |
-| Flow control | None |
-| Transfer method | Polling |
-| UART interrupts | Disabled |
-| DMA | Disabled |
+## Hardware and Wiring
 
-## Expected behavior
 
-After reset, the terminal displays:
+Use a 3.3 V USB-to-UART adapter:
 
 ```text
-STM32F103 UART polling ready
-Type characters to echo.
+Blue Pill PA9  USART1_TX  ---> adapter RX
+Blue Pill PA10 USART1_RX  <--- adapter TX
+Blue Pill GND              --- adapter GND
 ```
 
-Every byte typed in the terminal is transmitted back unchanged. Open the
-terminal first and press the Blue Pill Reset button to see the startup
-message again.
-
-This introductory example has no software FIFO. Normal typing is handled
-comfortably, but a large pasted burst can overrun the single-byte USART data
-register. A later interrupt-driven ring-buffer example addresses that case.
-
-Configure the terminal for:
+Terminal settings:
 
 ```text
 115200 baud
 8 data bits
 no parity
 1 stop bit
-no hardware flow control
+no flow control
 ```
 
-For example on Linux:
 
-```bash
-picocom -b 115200 /dev/ttyUSB0
-```
+## Compile-Time Configuration
 
-## Dependency path
+
+`BOARD_UART_BAUD_RATE` is `115200`.
+
+Board mapping:
 
 ```text
-Application
-    -> UART Service
-        -> Board UART
-            -> GPIO / RCC / USART1
+USART1_TX = PA9
+USART1_RX = PA10
 ```
 
-Application code does not include BSP, SPL, CMSIS, or STM32 device headers.
+TX uses alternate-function push-pull at 50 MHz. RX is floating input.
 
-## Polling policy
 
-The BSP exposes two non-blocking primitives:
+## Initialization Sequence
 
-```c
-bool board_uart_try_read_byte(uint8_t *byte);
-bool board_uart_try_write_byte(uint8_t byte);
+
+```text
+board_init()
+    |
+    +--> SystemCoreClockUpdate()
+    +--> board_uart_init()
+            |
+            +--> GPIOA + USART1 clocks
+            +--> PA9 AF push-pull
+            +--> PA10 floating input
+            +--> USART 115200 8N1
+            +--> RX + TX enable
+
+system_init()
+    |
+    +--> uart_service_init()
+    +--> application_init()
 ```
 
-They inspect `RXNE` and `TXE` and return immediately. The Application keeps at
-most one echo byte pending, so it never waits inside an unbounded polling
-loop.
+`uart_service_init()` has no hardware work because the BSP already owns
+peripheral initialization.
 
-Because UART interrupts are disabled, this example deliberately uses
-`__NOP()` in `system_idle()`. Replacing it with `__WFI()` would stop the
-super-loop from polling `RXNE`; incoming UART data alone would not wake the
-core.
 
-## Build
+## Runtime Behavior
 
-```bash
-make
+
+The Application first sends:
+
+```text
+STM32F103 UART polling ready
+Type characters to echo.
 ```
 
-The build first checks the project dependency rules:
+The message is not transmitted by a blocking string function. Each
+`application_process()` call attempts one byte when `TXE` is ready.
+
+After the greeting, the state machine keeps at most one pending echo byte:
+
+```text
+RXNE ready?
+    |
+    +--> read byte
+          |
+          v
+      pending echo
+          |
+TXE ready?
+    |
+    +--> write byte
+```
+
+If hardware is not ready, the function simply returns to the super-loop.
+
+
+## SPL / Low-Level Behavior
+
+
+`board_uart_try_read_byte()` checks `USART_FLAG_RXNE`.
+
+`board_uart_try_write_byte()` checks `USART_FLAG_TXE`.
+
+There is no USART IRQ, no DMA, and no software queue. This makes the example a
+useful baseline for comparison with Example 04.
+
+
+## Architectural Notes
+
+
+The key lesson is API shape. The upper layers already use `try_read` and
+`try_write`, which means Example 04 can change the transport implementation to
+interrupt-driven rings while preserving a similar non-blocking Application
+model.
+
+
+## Interrupt and Concurrency Policy
+
+The project follows the repository-wide rule that an interrupt handler belongs
+to the lowest module that owns the peripheral. The ISR, when present, may clear
+flags, transfer low-level data, and record bounded state. Higher-level policy is
+processed later in normal thread mode.
+
+`system_idle()` in this concrete example executes `__NOP()` rather than
+`__WFI()`.
+
+## Test Procedure and Expected Result
+
+
+Open a serial terminal at 115200 8N1 and reset the board.
+
+Expected greeting:
+
+```text
+STM32F103 UART polling ready
+Type characters to echo.
+```
+
+Type characters. Every received byte should be transmitted back.
+
+If there is no greeting:
+
+1. verify TX/RX are crossed correctly;
+2. verify common ground;
+3. verify the adapter uses 3.3 V logic;
+4. break in `board_uart_try_write_byte()`;
+5. inspect whether `USART_FLAG_TXE` becomes set.
+
+If greeting works but echo does not, inspect PA10/RX and `USART_FLAG_RXNE`.
+
+
+## GDB Debugging
+
+
+```gdb
+break board_uart_try_read_byte
+break board_uart_try_write_byte
+break application_process
+continue
+```
+
+Application state can be inspected in context:
+
+```gdb
+p s_startup_message_index
+p s_echo_pending
+p/x s_echo_byte
+```
+
+
+
+## Build, Flash, and Debug
+
+Run the commands from the example directory.
 
 ```bash
 make check-layers
+make clean
+make
 ```
 
-## Flash
+The build produces:
+
+```text
+build/firmware.elf
+build/firmware.hex
+build/firmware.bin
+build/firmware.lst
+build/firmware.map
+```
+
+Flash with OpenOCD:
 
 ```bash
 make flash
 ```
 
-## Debug
+Erase the MCU flash if needed:
 
-Terminal 1:
+```bash
+make erase
+```
+
+Start an OpenOCD debug server:
 
 ```bash
 make debug-server
 ```
 
-Terminal 2:
+Then, in another terminal:
 
 ```bash
 make debug
 ```
 
-## Configuration
+The Makefile prefers `arm-none-eabi-gdb` and falls back to `gdb-multiarch`.
 
-- Baud rate: `config/board_config.h`
-- USART pin mapping: `bsp/bluepill/src/board_pins.h`
-- Selected SPL modules: `config/modules.mk`
+The OpenOCD configuration uses SWD and:
 
-## Selected SPL modules
-
-```text
-stm32f10x_gpio.c
-stm32f10x_rcc.c
-stm32f10x_usart.c
+```tcl
+reset_config none
+adapter speed 1000
 ```
 
-## License
+This matches a common ST-Link connection where only `SWDIO`, `SWCLK`, `GND`,
+and `3.3V` are connected and NRST is not available.
 
-This example is licensed under the MIT License.
+
+## Troubleshooting Method
+
+Use a bottom-up approach:
+
+1. verify power and wiring;
+2. verify BSP pin/peripheral mapping;
+3. verify the peripheral clock is enabled;
+4. verify initialization succeeds;
+5. verify the low-level peripheral flag/interrupt/data path;
+6. verify Service state;
+7. verify Application policy.
+
+Do not immediately modify Application code when the underlying peripheral is
+not yet proven to work.
+
+## Porting Notes
+
+
+To move the console, update the USART instance, RCC clocks, GPIO port, and TX/RX
+pins in the BSP. If moving to USART2/USART3, also verify APB clock selection and
+alternate-function pin mapping.
+
+
+See [`docs/porting_guide.md`](docs/porting_guide.md) for a structured checklist.
+
+## Further Exercises
+
+Good next experiments include:
+
+- expose additional diagnostic counters through GDB;
+- add a second logical Service without letting Application include BSP headers;
+- deliberately inject a failure and trace how it propagates;
+- write a host-side test for portable Common or Service logic;
+- change one board resource and verify that Application does not need hardware
+  includes.
+
+## Related Documentation
+
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/adding_a_module.md`](docs/adding_a_module.md)
+- [`docs/porting_guide.md`](docs/porting_guide.md)

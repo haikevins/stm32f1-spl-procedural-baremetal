@@ -1,24 +1,92 @@
-# Adding a Module
+# Extending 03 - UART Polling
 
-Use the lowest layer that matches the responsibility.
+This guide shows how to add functionality while preserving the architecture of
+this example.
 
-| Responsibility | Location |
+## Before Adding Code
+
+Identify whether the new behavior is:
+
+| New responsibility | Put it in |
 |---|---|
-| Product state machine | `app/` |
-| Time, event, indication, protocol service | `services/` |
-| Onboard LED, button, console, timebase | `bsp/bluepill/` |
-| External display, sensor, EEPROM | `ecual/` |
-| CRC, ring buffer, fixed queue | `common/` |
-| Initialization wiring | `system/system_init.c` |
-| Required SPL implementation source | `config/modules.mk` |
+| Product/demo decision | `app/` |
+| Hardware-independent capability | `services/` |
+| New Blue Pill pin/peripheral | `bsp/bluepill/` |
+| New external IC protocol | `ecual/` |
+| Generic ring/queue/CRC/type | `common/` |
+| Initialization ordering | `system/` |
+| Additional SPL driver source | `config/modules.mk` |
+
+## Keep Existing Ownership Intact
+
+Current example focus:
+
+Configure USART1 at 115200 8N1 and implement a cooperative polling echo without interrupts, DMA, blocking delays, or unbounded waits.
+
+New code should not bypass the existing abstraction merely because a peripheral
+pointer is convenient.
 
 ## Procedure
 
-1. Define the public API in the layer's `include/` directory.
-2. Put implementation and private headers in the layer's `src/` directory.
-3. Include only APIs from permitted lower layers.
-4. Add required SPL source files to `config/modules.mk`.
-5. Connect initialization in `system/system_init.c`.
-6. Keep application processing non-blocking.
-7. Run `make check-layers`.
-8. Run `make`.
+1. **Define the API.** Create the header in the correct layer.
+2. **Add board mapping.** Put pins, peripheral instance, clock, and IRQ mapping
+   in BSP.
+3. **Add SPL implementation source.** Update `config/modules.mk`.
+4. **Implement low-level behavior.** Keep SPL/CMSIS calls below Services.
+5. **Add ECUAL if the new feature is an off-chip device.**
+6. **Add a Service** if Application needs a hardware-independent concept.
+7. **Connect initialization** in `system/system_init.c`.
+8. **Add bounded processing** to Application/Service `process()` functions.
+9. **Design ISR handoff** with flags/rings/queues rather than upward callbacks.
+10. **Document wiring, timing, test result, and failure behavior.**
+
+## Interrupt Checklist
+
+If the extension uses an IRQ:
+
+- [ ] handler name exactly matches the startup vector;
+- [ ] pending peripheral flag is acknowledged correctly;
+- [ ] ISR has no delay loop;
+- [ ] ISR has no Application include;
+- [ ] ISR does not format text or run a protocol state machine;
+- [ ] buffer overflow behavior is defined;
+- [ ] Service/Application consumes the event in thread mode.
+
+## Configuration Checklist
+
+Put behavior-changing constants in `config/` rather than scattering literals.
+
+Examples include:
+
+- baud rate;
+- buffer size;
+- debounce time;
+- sample rate;
+- PWM frequency;
+- bus frequency;
+- timeout;
+- external-device address.
+
+## SPL Source Checklist
+
+After adding a peripheral, make sure its SPL implementation `.c` file is listed
+in `config/modules.mk`. Including only the header is not sufficient.
+
+## Validation
+
+```bash
+make check-layers
+make clean
+make
+```
+
+Then test both normal operation and at least one failure case.
+
+## Regression Questions
+
+- Does the original example behavior still work?
+- Can Application still build without BSP/SPL headers?
+- Is any ISR longer than before?
+- Is the super-loop still bounded?
+- Are new shared variables safe across ISR/thread context?
+- Is every new hardware assumption documented?

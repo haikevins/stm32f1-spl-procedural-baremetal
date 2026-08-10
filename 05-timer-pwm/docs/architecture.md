@@ -1,6 +1,6 @@
-# Layered Architecture
+# Architecture - 05 - Timer PWM
 
-## Runtime dependency direction
+## Runtime Dependency Direction
 
 ```text
 Application
@@ -8,82 +8,157 @@ Application
     v
 Services
     |
-    v
-BSP / ECU Abstraction
+    +------> BSP
     |
-    v
-STM32F10x Standard Peripheral Library
-    |
-    v
-CMSIS
-    |
-    v
-STM32F103 hardware
+    +------> ECUAL, when an external device exists
+                  |
+                  v
+          Board peripheral APIs
+                  |
+                  v
+            STM32F10x SPL
+                  |
+                  v
+              CMSIS/MCU
 ```
 
-`system/` is the composition root. It may initialize and connect multiple
-layers, but it must not contain product behavior.
+`system/` is the composition root and owns initialization order.
 
-`startup/`, `linker/`, `runtime/`, `config/`, `tools/`, and `third_party/`
-are infrastructure areas rather than application layers.
+## Example-Specific Data Flow
 
-## Layer responsibilities
+
+TIM2 generates the waveform continuously in hardware.
+
+Every 10 ms the Application changes its desired duty by 10 permille:
+
+```text
+0 -> 10 -> ... -> 1000 -> 990 -> ... -> 0 -> repeat
+```
+
+`pwm_service_set_duty_permille()` passes the logical duty to the BSP.
+
+The BSP calculates compare counts with rounding:
+
+```text
+compare = duty_permille * period_counts / 1000
+```
+
+No TIM2 interrupt is needed.
+
+
+## Module Responsibilities
 
 ### Application
 
-Contains product policy, state machines, and non-blocking behavior.
-
-Application code may include Services and hardware-independent Common code.
-It must not include BSP, ECUAL, CMSIS, SPL, or raw STM32 headers.
+Owns demo/product policy. It must not know physical pins, peripheral instances,
+SPL structures, or interrupt flags.
 
 ### Services
 
-Expose hardware-independent capabilities such as time, indications,
-communication, diagnostics, scheduling, and event delivery.
-
-Services may use BSP and ECUAL public APIs. Services must not include
-Application headers or raw STM32/SPL headers.
+Translate board/external-device capabilities into stable application-facing
+APIs. Service logic is where debounce, filtering, aggregation, or logical
+indications belong.
 
 ### BSP
 
-Maps logical board resources to physical MCU pins and peripherals.
+Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
+initialization, NVIC setup, and low-level ISR when applicable.
 
-Examples include onboard LEDs, buttons, console ports, and the board
-timebase. BSP modules may call SPL and CMSIS.
+### ECUAL
 
-### ECU Abstraction
-
-Contains drivers for external devices such as displays, sensors, EEPROMs,
-and transceivers. For portability, ECUAL modules should use BSP bus
-interfaces rather than including STM32 SPL directly.
+Used only when this example communicates with an off-chip device. ECUAL owns
+the external device protocol and should depend on a board bus abstraction.
 
 ### Common
 
-Contains hardware-independent utilities such as CRC, fixed-size queues,
-ring buffers, bit utilities, and generic data types.
+Contains portable helpers or shared types with no STM32 dependency.
 
 ### System
 
-Owns the composition root, initialization order, the main super-loop, idle
-policy, and fatal-error policy. It may connect layers but must not implement
-application behavior.
+Initializes modules in dependency order and then runs the super-loop. It must
+not contain the example's behavior.
 
-### Vendor peripheral layer
+## Initialization
 
-`third_party/STM32F10x_StdPeriph_Driver` acts as the vendor peripheral
-driver or MCAL-equivalent layer for this SPL-based project.
 
-`third_party/CMSIS` provides Cortex-M3 and STM32F103 device definitions.
+`board_pwm_init()` determines the TIM2 input clock through
+`RCC_GetClocksFreq()`. Because TIM2 is on APB1, it doubles PCLK1 when the APB1
+prescaler is not 1.
 
-## Interrupt rule
+The BSP then calculates:
 
-An ISR must remain in the lowest layer that owns its hardware resource. It
-may acknowledge flags, move data into a static low-level buffer, or update a
-low-level counter.
+```text
+prescaler divider = timer_clock / 1 MHz
+period counts     = 1 MHz / 1 kHz = 1000
+```
 
-An ISR must not call Application or Service functions.
+TIM2 CH1 is configured for PWM mode 1 with output and preload enabled.
 
-## Enforcement
+The board then starts the 1 ms SysTick timebase used only to decide when the
+Application changes duty.
+
+
+## Low-Level Ownership
+
+
+Important SPL concepts:
+
+- `TIM_TimeBaseInit()` sets PSC/ARR;
+- `TIM_OC1Init()` selects PWM1;
+- `TIM_OC1PreloadConfig()` enables CCR preload;
+- `TIM_ARRPreloadConfig()` enables ARR preload;
+- `TIM_SetCompare1()` updates duty;
+- `TIM_Cmd()` starts TIM2.
+
+SysTick is a separate scheduler timebase and does not generate the PWM waveform.
+
+
+## Interrupt Boundary
+
+The weak startup vector is overridden only by the module that owns the active
+interrupt source.
+
+The correct flow is:
+
+```text
+hardware interrupt
+    |
+lowest owning module ISR
+    |
+static low-level state
+    |
+normal thread-mode API
+    |
+Service
+    |
+Application
+```
+
+The wrong flow is:
+
+```text
+ISR -> Application callback/state machine
+```
+
+## Concurrency Principles
+
+When state is shared between ISR and thread mode:
+
+- keep the shared object static and bounded;
+- mark asynchronously changed scalar state `volatile` where appropriate;
+- make multi-step read/clear operations atomic with a short critical section;
+- never hold interrupts disabled while performing slow peripheral operations;
+- make overflow/error behavior explicit.
+
+## Why This Separation Matters
+
+
+This example separates scheduling from signal generation. SysTick tells the
+Application when to change state; TIM2 owns the precise PWM edges. That pattern
+scales better than software-toggling a GPIO at PWM frequency.
+
+
+## Dependency Enforcement
 
 Run:
 
@@ -91,5 +166,5 @@ Run:
 make check-layers
 ```
 
-The checker rejects forbidden project-header dependencies before the
-firmware is compiled.
+A successful build should not require weakening the checker. If a new include
+is rejected, reconsider module placement before adding an exception.

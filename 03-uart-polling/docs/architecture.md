@@ -1,6 +1,6 @@
-# Layered Architecture
+# Architecture - 03 - UART Polling
 
-## Runtime dependency direction
+## Runtime Dependency Direction
 
 ```text
 Application
@@ -8,82 +8,168 @@ Application
     v
 Services
     |
-    v
-BSP / ECU Abstraction
+    +------> BSP
     |
-    v
-STM32F10x Standard Peripheral Library
-    |
-    v
-CMSIS
-    |
-    v
-STM32F103 hardware
+    +------> ECUAL, when an external device exists
+                  |
+                  v
+          Board peripheral APIs
+                  |
+                  v
+            STM32F10x SPL
+                  |
+                  v
+              CMSIS/MCU
 ```
 
-`system/` is the composition root. It may initialize and connect multiple
-layers, but it must not contain product behavior.
+`system/` is the composition root and owns initialization order.
 
-`startup/`, `linker/`, `runtime/`, `config/`, `tools/`, and `third_party/`
-are infrastructure areas rather than application layers.
+## Example-Specific Data Flow
 
-## Layer responsibilities
+
+The Application first sends:
+
+```text
+STM32F103 UART polling ready
+Type characters to echo.
+```
+
+The message is not transmitted by a blocking string function. Each
+`application_process()` call attempts one byte when `TXE` is ready.
+
+After the greeting, the state machine keeps at most one pending echo byte:
+
+```text
+RXNE ready?
+    |
+    +--> read byte
+          |
+          v
+      pending echo
+          |
+TXE ready?
+    |
+    +--> write byte
+```
+
+If hardware is not ready, the function simply returns to the super-loop.
+
+
+## Module Responsibilities
 
 ### Application
 
-Contains product policy, state machines, and non-blocking behavior.
-
-Application code may include Services and hardware-independent Common code.
-It must not include BSP, ECUAL, CMSIS, SPL, or raw STM32 headers.
+Owns demo/product policy. It must not know physical pins, peripheral instances,
+SPL structures, or interrupt flags.
 
 ### Services
 
-Expose hardware-independent capabilities such as time, indications,
-communication, diagnostics, scheduling, and event delivery.
-
-Services may use BSP and ECUAL public APIs. Services must not include
-Application headers or raw STM32/SPL headers.
+Translate board/external-device capabilities into stable application-facing
+APIs. Service logic is where debounce, filtering, aggregation, or logical
+indications belong.
 
 ### BSP
 
-Maps logical board resources to physical MCU pins and peripherals.
+Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
+initialization, NVIC setup, and low-level ISR when applicable.
 
-Examples include onboard LEDs, buttons, console ports, and the board
-timebase. BSP modules may call SPL and CMSIS.
+### ECUAL
 
-### ECU Abstraction
-
-Contains drivers for external devices such as displays, sensors, EEPROMs,
-and transceivers. For portability, ECUAL modules should use BSP bus
-interfaces rather than including STM32 SPL directly.
+Used only when this example communicates with an off-chip device. ECUAL owns
+the external device protocol and should depend on a board bus abstraction.
 
 ### Common
 
-Contains hardware-independent utilities such as CRC, fixed-size queues,
-ring buffers, bit utilities, and generic data types.
+Contains portable helpers or shared types with no STM32 dependency.
 
 ### System
 
-Owns the composition root, initialization order, the main super-loop, idle
-policy, and fatal-error policy. It may connect layers but must not implement
-application behavior.
+Initializes modules in dependency order and then runs the super-loop. It must
+not contain the example's behavior.
 
-### Vendor peripheral layer
+## Initialization
 
-`third_party/STM32F10x_StdPeriph_Driver` acts as the vendor peripheral
-driver or MCAL-equivalent layer for this SPL-based project.
 
-`third_party/CMSIS` provides Cortex-M3 and STM32F103 device definitions.
+```text
+board_init()
+    |
+    +--> SystemCoreClockUpdate()
+    +--> board_uart_init()
+            |
+            +--> GPIOA + USART1 clocks
+            +--> PA9 AF push-pull
+            +--> PA10 floating input
+            +--> USART 115200 8N1
+            +--> RX + TX enable
 
-## Interrupt rule
+system_init()
+    |
+    +--> uart_service_init()
+    +--> application_init()
+```
 
-An ISR must remain in the lowest layer that owns its hardware resource. It
-may acknowledge flags, move data into a static low-level buffer, or update a
-low-level counter.
+`uart_service_init()` has no hardware work because the BSP already owns
+peripheral initialization.
 
-An ISR must not call Application or Service functions.
 
-## Enforcement
+## Low-Level Ownership
+
+
+`board_uart_try_read_byte()` checks `USART_FLAG_RXNE`.
+
+`board_uart_try_write_byte()` checks `USART_FLAG_TXE`.
+
+There is no USART IRQ, no DMA, and no software queue. This makes the example a
+useful baseline for comparison with Example 04.
+
+
+## Interrupt Boundary
+
+The weak startup vector is overridden only by the module that owns the active
+interrupt source.
+
+The correct flow is:
+
+```text
+hardware interrupt
+    |
+lowest owning module ISR
+    |
+static low-level state
+    |
+normal thread-mode API
+    |
+Service
+    |
+Application
+```
+
+The wrong flow is:
+
+```text
+ISR -> Application callback/state machine
+```
+
+## Concurrency Principles
+
+When state is shared between ISR and thread mode:
+
+- keep the shared object static and bounded;
+- mark asynchronously changed scalar state `volatile` where appropriate;
+- make multi-step read/clear operations atomic with a short critical section;
+- never hold interrupts disabled while performing slow peripheral operations;
+- make overflow/error behavior explicit.
+
+## Why This Separation Matters
+
+
+The key lesson is API shape. The upper layers already use `try_read` and
+`try_write`, which means Example 04 can change the transport implementation to
+interrupt-driven rings while preserving a similar non-blocking Application
+model.
+
+
+## Dependency Enforcement
 
 Run:
 
@@ -91,5 +177,5 @@ Run:
 make check-layers
 ```
 
-The checker rejects forbidden project-header dependencies before the
-firmware is compiled.
+A successful build should not require weakening the checker. If a new include
+is rejected, reconsider module placement before adding an exception.
