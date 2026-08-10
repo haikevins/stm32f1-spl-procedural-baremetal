@@ -1,4 +1,4 @@
-# STM32F1 SPL Procedural Bare-Metal Examples
+﻿# STM32F1 SPL Procedural Bare-Metal Examples
 
 A collection of self-contained examples for the **STM32F103C8T6 Blue Pill**, implemented in C11 and ARM assembly using **CMSIS**, the **STM32F10x Standard Peripheral Library (SPL)**, and **GNU Make**.
 
@@ -20,11 +20,11 @@ These examples are derived from the project skeleton maintained on the repositor
 | Directory | Description | Main components |
 |---|---|---|
 | [`01-blink-led`](01-blink-led) | Non-blocking blink of the Blue Pill PC13 status LED | GPIO, SysTick, Time Service, Indication Service |
+| [`02-gpio-input-interrupt`](02-gpio-input-interrupt) | Toggle PC13 from a debounced PA0 EXTI interrupt | GPIO, AFIO, EXTI, SysTick, Button Service |
 
 Possible future examples can follow the same numbered convention:
 
 ```text
-02-gpio-input-interrupt/
 03-uart-polling/
 04-uart-interrupt-ring-buffer/
 05-timer-pwm/
@@ -51,7 +51,7 @@ cd stm32f1-spl-examples
 Enter the example directory and run `make`:
 
 ```bash
-cd 01-blink-led
+cd 02-gpio-input-interrupt
 make
 ```
 
