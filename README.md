@@ -347,38 +347,38 @@ Recommended sequence:
 
 ### Architecture
 
-- [ ] Application has no BSP/SPL/CMSIS includes.
-- [ ] Services contain no Application dependency.
-- [ ] External-device logic is isolated from board wiring.
-- [ ] ISR ownership is explicit.
+- Application has no BSP/SPL/CMSIS includes.
+- Services contain no Application dependency.
+- External-device logic is isolated from board wiring.
+- ISR ownership is explicit.
 
 ### Runtime
 
-- [ ] `.data` and `.bss` initialize correctly.
-- [ ] `system_init()` orders dependencies correctly.
-- [ ] `application_process()` is bounded.
-- [ ] panic behavior is intentional.
+- `.data` and `.bss` initialize correctly.
+- `system_init()` orders dependencies correctly.
+- `application_process()` is bounded.
+- panic behavior is intentional.
 
 ### Peripheral
 
-- [ ] Pin mapping matches schematic.
-- [ ] RCC clocks are enabled.
-- [ ] Bus/timer clock assumptions are verified.
-- [ ] Interrupt flags are cleared correctly.
-- [ ] Timeout/overflow behavior is defined.
+- Pin mapping matches schematic.
+- RCC clocks are enabled.
+- Bus/timer clock assumptions are verified.
+- Interrupt flags are cleared correctly.
+- Timeout/overflow behavior is defined.
 
 ### Tooling
 
-- [ ] `make check-layers` passes.
-- [ ] clean build succeeds.
-- [ ] OpenOCD connects.
-- [ ] GDB symbols are usable.
+- `make check-layers` passes.
+- clean build succeeds.
+- OpenOCD connects.
+- GDB symbols are usable.
 
 ### Docs
 
-- [ ] README documents behavior and wiring.
-- [ ] architecture document explains ownership.
-- [ ] porting guide describes clock/pin/IRQ changes.
+- README documents behavior and wiring.
+- architecture document explains ownership.
+- porting guide describes clock/pin/IRQ changes.
 
 ## 23. Documentation
 
