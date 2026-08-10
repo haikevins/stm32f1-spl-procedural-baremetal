@@ -110,15 +110,15 @@ Replace Board Memory Bus and vendor SPI implementation.
 
 ## 10. Validation Checklist
 
-- [ ] CS idle HIGH;
-- [ ] SPI mode 0 correct;
-- [ ] SCK below configured maximum;
-- [ ] JEDEC ID correct;
-- [ ] WEL sets after Write Enable;
-- [ ] BUSY clears after program/erase;
-- [ ] read-back matches;
-- [ ] test sector is safe/destructive by design;
-- [ ] layer checker passes.
+-  CS idle HIGH;
+-  SPI mode 0 correct;
+-  SCK below configured maximum;
+-  JEDEC ID correct;
+-  WEL sets after Write Enable;
+-  BUSY clears after program/erase;
+-  read-back matches;
+-  test sector is safe/destructive by design;
+-  layer checker passes.
 
 ## 11. Common Pitfalls
 

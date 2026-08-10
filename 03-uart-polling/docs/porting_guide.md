@@ -69,13 +69,13 @@ Replace the Board UART implementation and vendor peripheral layer.
 
 ## 8. Post-Port Tests
 
-- [ ] TX idle level correct.
-- [ ] greeting readable.
-- [ ] exact 115200 baud verified.
-- [ ] RX path works.
-- [ ] echo works.
-- [ ] no blocking wait was accidentally introduced.
-- [ ] layer checker passes.
+-  TX idle level correct.
+-  greeting readable.
+-  exact 115200 baud verified.
+-  RX path works.
+-  echo works.
+-  no blocking wait was accidentally introduced.
+-  layer checker passes.
 
 ## 9. Common Pitfalls
 

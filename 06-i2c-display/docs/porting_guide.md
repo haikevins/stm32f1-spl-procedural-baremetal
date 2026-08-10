@@ -87,15 +87,15 @@ Replace the Board Display Bus and low-level I2C implementation.
 
 ## 9. Verification Checklist
 
-- [ ] correct address;
-- [ ] SDA/SCL idle HIGH;
-- [ ] SCL frequency correct;
-- [ ] address ACK received;
-- [ ] command writes succeed;
-- [ ] framebuffer write succeeds;
-- [ ] no I2C error flags;
-- [ ] display orientation correct;
-- [ ] layer checker passes.
+-  correct address;
+-  SDA/SCL idle HIGH;
+-  SCL frequency correct;
+-  address ACK received;
+-  command writes succeed;
+-  framebuffer write succeeds;
+-  no I2C error flags;
+-  display orientation correct;
+-  layer checker passes.
 
 ## 10. Logic Analyzer Checklist
 

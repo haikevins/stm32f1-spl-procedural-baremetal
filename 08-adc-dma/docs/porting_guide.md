@@ -131,18 +131,18 @@ Measure the expected block cadence:
 
 ## 12. Validation Checklist
 
-- [ ] PA0/channel mapping correct;
-- [ ] ADC clock within limit;
-- [ ] calibration completes;
-- [ ] TIM3 frequency correct;
-- [ ] ADC conversions triggered externally;
-- [ ] DMA1 CH1 transfers;
-- [ ] HT/TC alternate;
-- [ ] sequence increases;
-- [ ] errors zero;
-- [ ] overruns zero at normal load;
-- [ ] voltage trend matches input;
-- [ ] hysteresis works.
+-  PA0/channel mapping correct;
+-  ADC clock within limit;
+-  calibration completes;
+-  TIM3 frequency correct;
+-  ADC conversions triggered externally;
+-  DMA1 CH1 transfers;
+-  HT/TC alternate;
+-  sequence increases;
+-  errors zero;
+-  overruns zero at normal load;
+-  voltage trend matches input;
+-  hysteresis works.
 
 ## 13. Common Pitfalls
 

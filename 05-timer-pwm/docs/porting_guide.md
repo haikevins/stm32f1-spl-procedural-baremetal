@@ -83,14 +83,14 @@ not apply identically.
 
 ## 8. Validation Checklist
 
-- [ ] expected timer input clock measured/derived;
-- [ ] PWM frequency correct;
-- [ ] 0% really produces inactive output;
-- [ ] 100% really produces continuous active output;
-- [ ] duty changes smoothly;
-- [ ] preload behavior correct;
-- [ ] no timer ISR unexpectedly enabled;
-- [ ] layer checker passes.
+-  expected timer input clock measured/derived;
+-  PWM frequency correct;
+-  0% really produces inactive output;
+-  100% really produces continuous active output;
+-  duty changes smoothly;
+-  preload behavior correct;
+-  no timer ISR unexpectedly enabled;
+-  layer checker passes.
 
 ## 9. Common Pitfalls
 

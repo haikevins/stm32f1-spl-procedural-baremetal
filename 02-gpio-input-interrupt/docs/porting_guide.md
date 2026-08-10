@@ -82,13 +82,13 @@ Replace:
 
 ## 8. Verification Checklist
 
-- [ ] released input has a stable idle level;
-- [ ] one physical press produces an interrupt;
-- [ ] pending flag clears;
-- [ ] raw event transfers to thread mode;
-- [ ] debounce delay is correct;
-- [ ] one press produces one logical event;
-- [ ] LED toggles only through Indication Service.
+-  released input has a stable idle level;
+-  one physical press produces an interrupt;
+-  pending flag clears;
+-  raw event transfers to thread mode;
+-  debounce delay is correct;
+-  one press produces one logical event;
+-  LED toggles only through Indication Service.
 
 ## 9. GDB Checklist
 

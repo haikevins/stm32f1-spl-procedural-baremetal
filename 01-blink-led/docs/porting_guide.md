@@ -97,13 +97,13 @@ Replace:
 
 ## 9. Validation Checklist
 
-- [ ] `make check-layers` passes.
-- [ ] reset reaches `main()`.
-- [ ] timebase increments at 1 ms.
-- [ ] logical LED OFF is correct at startup.
-- [ ] LED toggles every 500 ms.
-- [ ] one full blink period is about one second.
-- [ ] GDB can attach reliably.
+-  `make check-layers` passes.
+-  reset reaches `main()`.
+-  timebase increments at 1 ms.
+-  logical LED OFF is correct at startup.
+-  LED toggles every 500 ms.
+-  one full blink period is about one second.
+-  GDB can attach reliably.
 
 ## 10. Common Mistakes
 
