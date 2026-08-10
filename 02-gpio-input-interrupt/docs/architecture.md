@@ -1,196 +1,160 @@
-# Architecture - 02 - GPIO Input Interrupt
+# Architecture — 02-gpio-input-interrupt
 
-## Runtime Dependency Direction
+## 1. Layer Diagram
 
 ```text
 Application
     |
-    v
-Services
+    +--> Button Service
+    |       |
+    |       +--> Board Button
+    |       |       |
+    |       |       +--> GPIO/AFIO/EXTI SPL
+    |       |
+    |       +--> Time Service
+    |               |
+    |               v
+    |          Board Timebase
     |
-    +------> BSP
-    |
-    +------> ECUAL, when an external device exists
-                  |
-                  v
-          Board peripheral APIs
-                  |
-                  v
-            STM32F10x SPL
-                  |
-                  v
-              CMSIS/MCU
+    +--> Indication Service
+            |
+            v
+         Board LED
 ```
 
-`system/` is the composition root and owns initialization order.
+## 2. Ownership
 
-## Example-Specific Data Flow
+| Concern | Owner |
+|---|---|
+| PA0 electrical mode | Board Button |
+| EXTI0 mapping | Board Button |
+| EXTI0 IRQ | Board Button |
+| raw press-edge flag | Board Button |
+| 30 ms debounce | Button Service |
+| debounced press event | Button Service |
+| toggle policy | Application |
+| PC13 polarity | Board LED |
 
+## 3. Why Debounce Is Not in the ISR
 
-The ISR does not debounce:
+Mechanical bounce can last milliseconds.
+
+Waiting inside an ISR would:
+
+- block lower-priority interrupts;
+- increase interrupt latency;
+- couple hardware capture with policy;
+- make timing harder to reason about.
+
+The ISR records the edge only. Thread mode owns elapsed-time validation.
+
+## 4. EXTI Event Lifecycle
 
 ```text
-PA0 falling edge
+physical falling edge
+    |
+EXTI0 pending
     |
 EXTI0_IRQHandler
     |
-    +--> set s_press_edge_pending
-    +--> clear EXTI pending bit
+s_press_edge_pending = true
     |
-return
+thread takes raw edge
+    |
+30 ms debounce window
+    |
+sample PA0
+    |
+pressed event pending
+    |
+Application takes event
+    |
+toggle indication
 ```
 
-Thread mode performs debounce:
+## 5. Concurrency Model
+
+One boolean is shared between ISR and thread mode.
+
+The BSP protects the take-and-clear operation using saved PRIMASK state.
+
+This is enough because:
+
+- producer is one ISR;
+- consumer is one thread;
+- only one pending edge needs to be retained for the debounce strategy.
+
+If every edge count mattered, a counter/queue would be required.
+
+## 6. Initialization Order
+
+The correct order is:
 
 ```text
-button_service_process()
+LED + timebase + button hardware
     |
-    +--> take low-level edge?
-    |       |
-    |       +--> record start time, enable debounce
-    |
-    +--> 30 ms elapsed?
-            |
-            +--> no: return
-            |
-            +--> yes: sample PA0
-                       |
-                       +--> still pressed -> publish pressed event
-
-application_process()
-    |
-    +--> take pressed event?
-            |
-            +--> toggle logical indicator
-```
-
-Every new falling edge restarts the debounce window, absorbing mechanical
-bounce without blocking the ISR or super-loop.
-
-
-## Module Responsibilities
-
-### Application
-
-Owns demo/product policy. It must not know physical pins, peripheral instances,
-SPL structures, or interrupt flags.
-
-### Services
-
-Translate board/external-device capabilities into stable application-facing
-APIs. Service logic is where debounce, filtering, aggregation, or logical
-indications belong.
-
-### BSP
-
-Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
-initialization, NVIC setup, and low-level ISR when applicable.
-
-### ECUAL
-
-Used only when this example communicates with an off-chip device. ECUAL owns
-the external device protocol and should depend on a board bus abstraction.
-
-### Common
-
-Contains portable helpers or shared types with no STM32 dependency.
-
-### System
-
-Initializes modules in dependency order and then runs the super-loop. It must
-not contain the example's behavior.
-
-## Initialization
-
-
-```text
-board_init()
-    |
-    +--> board_led_init()
-    +--> board_timebase_init()
-    +--> board_button_init()
-            |
-            +--> GPIOA + AFIO clocks
-            +--> PA0 input pull-up
-            +--> GPIO_EXTILineConfig()
-            +--> EXTI falling-edge config
-            +--> clear pending EXTI0
-            +--> NVIC priority + enable
-
-system_init()
-    |
-    +--> time_service_init()
-    +--> indication_service_init()
-    +--> button_service_init()
-    +--> application_init()
-```
-
-`button_service_init()` discards any edge captured during startup.
-
-
-## Low-Level Ownership
-
-
-The board layer uses SPL EXTI/GPIO/RCC APIs and CMSIS NVIC primitives.
-
-The ISR-owned/shared item is the `volatile bool s_press_edge_pending`. Thread
-mode clears it using a short PRIMASK-protected critical section so an
-interrupt cannot be lost between read and clear.
-
-
-## Interrupt Boundary
-
-The weak startup vector is overridden only by the module that owns the active
-interrupt source.
-
-The correct flow is:
-
-```text
-hardware interrupt
-    |
-lowest owning module ISR
-    |
-static low-level state
-    |
-normal thread-mode API
-    |
-Service
+Services
     |
 Application
 ```
 
-The wrong flow is:
+The Button Service requires a working timebase for debounce.
+
+## 7. Layer Boundaries
+
+Application may include:
 
 ```text
-ISR -> Application callback/state machine
+button_service.h
+indication_service.h
 ```
 
-## Concurrency Principles
+It must not include:
 
-When state is shared between ISR and thread mode:
-
-- keep the shared object static and bounded;
-- mark asynchronously changed scalar state `volatile` where appropriate;
-- make multi-step read/clear operations atomic with a short critical section;
-- never hold interrupts disabled while performing slow peripheral operations;
-- make overflow/error behavior explicit.
-
-## Why This Separation Matters
-
-
-This example demonstrates the repository's interrupt ownership rule: the BSP
-owns EXTI0 because it owns the physical button. The Service owns debounce
-policy. The Application owns the decision that a debounced press toggles the
-status indication.
-
-
-## Dependency Enforcement
-
-Run:
-
-```bash
-make check-layers
+```text
+board_button.h
+stm32f10x_exti.h
+stm32f10x_gpio.h
 ```
 
-A successful build should not require weakening the checker. If a new include
-is rejected, reconsider module placement before adding an exception.
+## 8. Generic EXTI Abstraction
+
+This SPL example keeps EXTI configuration directly in the Board Button module
+instead of introducing a separate generic MCAL layer.
+
+That is acceptable because SPL itself acts as the low-level peripheral layer.
+
+If many board inputs require EXTI, a reusable lower-level EXTI wrapper may be
+introduced, but it should remain below Services.
+
+## 9. Failure Propagation
+
+Board initialization functions in this example are mostly void except for the
+timebase. A SysTick configuration failure causes:
+
+```text
+board_init() -> false
+system_init() -> false
+system_panic()
+```
+
+Runtime bounce/noise is handled as a normal event-filtering concern rather than
+a fatal error.
+
+## 10. Extension Strategy
+
+For richer button behavior:
+
+```text
+Board Button
+    |
+raw edge/level
+    |
+Button Service
+    |
+press/release/long/double events
+    |
+Application
+```
+
+Keep the physical pin and EXTI details at the bottom even as the Service grows.

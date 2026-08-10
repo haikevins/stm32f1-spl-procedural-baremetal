@@ -1,123 +1,88 @@
-# Porting Guide - 03 - UART Polling
+# Porting Guide — 03-uart-polling
 
-## Current Hardware Assumptions
+## 1. Changing Pins While Keeping USART1
 
+STM32F1 alternate-function mapping may require AFIO remap support if you move
+away from the default PA9/PA10 mapping.
 
-Use a 3.3 V USB-to-UART adapter:
+Update BSP only.
 
-```text
-Blue Pill PA9  USART1_TX  ---> adapter RX
-Blue Pill PA10 USART1_RX  <--- adapter TX
-Blue Pill GND              --- adapter GND
+Application and UART Service should remain unchanged.
+
+## 2. Moving to USART2/USART3
+
+Update:
+
+- peripheral instance;
+- RCC bus/clock;
+- TX/RX pins;
+- GPIO port;
+- any remap configuration.
+
+Remember USART1 is on APB2, while USART2/USART3 are on APB1.
+
+## 3. Changing Baud Rate
+
+Update:
+
+```c
+#define BOARD_UART_BAUD_RATE (...)
 ```
 
-Terminal settings:
+SPL recalculates the peripheral baud configuration.
+
+Verify with a terminal or logic analyzer.
+
+## 4. Changing the Clock Tree
+
+Re-check the peripheral clock seen by the selected USART.
+
+Do not assume baud remains correct after changing system/APB clocks.
+
+## 5. Changing Data Format
+
+Modify BSP `USART_InitTypeDef`:
+
+- word length;
+- parity;
+- stop bits;
+- hardware flow control.
+
+Document matching terminal settings.
+
+## 6. Adding a Blocking API with Timeout
+
+If a blocking helper is required, keep it below Application and make the wait
+bounded.
+
+Prefer preserving the non-blocking API for normal super-loop use.
+
+## 7. Porting to Another MCU Family
+
+Keep:
 
 ```text
-115200 baud
-8 data bits
-no parity
-1 stop bit
-no flow control
+Application -> UART Service
 ```
 
+Replace the Board UART implementation and vendor peripheral layer.
 
-## Current Configuration Assumptions
+## 8. Post-Port Tests
 
+- [ ] TX idle level correct.
+- [ ] greeting readable.
+- [ ] exact 115200 baud verified.
+- [ ] RX path works.
+- [ ] echo works.
+- [ ] no blocking wait was accidentally introduced.
+- [ ] layer checker passes.
 
-`BOARD_UART_BAUD_RATE` is `115200`.
+## 9. Common Pitfalls
 
-Board mapping:
-
-```text
-USART1_TX = PA9
-USART1_RX = PA10
-```
-
-TX uses alternate-function push-pull at 50 MHz. RX is floating input.
-
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
-
-```text
-app/
-services/
-common/
-```
-
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
-
-```text
-bsp/bluepill/
-config/
-config/modules.mk
-```
-
-A larger MCU change may also require:
-
-```text
-startup/
-linker/
-third_party/
-tools/openocd/
-```
-
-## Pin/Peripheral Porting
-
-
-To move the console, update the USART instance, RCC clocks, GPIO port, and TX/RX
-pins in the BSP. If moving to USART2/USART3, also verify APB clock selection and
-alternate-function pin mapping.
-
-
-## Clock Review
-
-Never copy prescaler/baud/timer values blindly.
-
-Verify:
-
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
-
-## Interrupt Review
-
-If the peripheral or pin changes:
-
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
-
-## Electrical Review
-
-Check:
-
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
-
-## Port Validation Checklist
-
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+- TX connected to TX instead of adapter RX;
+- no common ground;
+- 5 V adapter logic;
+- wrong APB clock assumption;
+- forgetting AF remap;
+- changing USART but not GPIO/RCC mapping;
+- turning `try_write` into an unbounded wait.

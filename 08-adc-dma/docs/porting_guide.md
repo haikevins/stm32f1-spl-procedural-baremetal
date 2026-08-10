@@ -1,129 +1,158 @@
-# Porting Guide - 08 - ADC + DMA
+# Porting Guide — 08-adc-dma
 
-## Current Hardware Assumptions
+## 1. Changing ADC Input Pin/Channel
 
+Update both:
 
-Use a potentiometer:
+- GPIO analog pin;
+- ADC channel number.
 
-```text
-3.3 V ---- potentiometer ---- GND
-                  |
-                  +---- PA0 / ADC1_IN0
+These must match the STM32F103 pinout.
+
+Keep Application unchanged.
+
+## 2. Changing Sample Rate
+
+Update:
+
+```c
+BOARD_ADC_SAMPLE_RATE_HZ
 ```
-
-The onboard PC13 LED is used as a threshold indicator.
-
-Do not intentionally drive the analog input outside the MCU supply range.
-
-
-## Current Configuration Assumptions
-
-
-| Setting | Value |
-|---|---|
-| ADC | ADC1 |
-| Channel | 0 |
-| Pin | PA0 |
-| ADC reference assumption | 3300 mV |
-| Raw full scale | 4095 |
-| ADC sample time | 55.5 cycles |
-| ADC clock configuration | PCLK2 / 6 |
-| Trigger timer | TIM3 |
-| Timer tick target | 1 MHz |
-| Sample rate | 1 kHz |
-| DMA | DMA1 Channel 1 |
-| DMA mode | circular |
-| DMA storage | 64 halfwords |
-| Published block | 32 samples |
-| IRQ priority | preemption 1, subpriority 0 |
-| LED ON threshold | 1800 mV |
-| LED OFF threshold | 1500 mV |
-
-The two LED thresholds provide hysteresis.
-
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
-
-```text
-app/
-services/
-common/
-```
-
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
-
-```text
-bsp/bluepill/
-config/
-config/modules.mk
-```
-
-A larger MCU change may also require:
-
-```text
-startup/
-linker/
-third_party/
-tools/openocd/
-```
-
-## Pin/Peripheral Porting
-
-
-When changing the ADC input, update GPIO pin and ADC channel together. When
-changing sample rate, verify TIM3 clock, timer tick divisibility, period range,
-ADC conversion time, and DMA processing budget. If VDDA differs from 3.3 V,
-update or calibrate the reference used for millivolt conversion.
-
-
-## Clock Review
-
-Never copy prescaler/baud/timer values blindly.
 
 Verify:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+```text
+timer_tick % sample_rate == 0
+```
 
-## Interrupt Review
+and confirm ADC conversion time is short enough for the requested rate.
 
-If the peripheral or pin changes:
+## 3. Changing Trigger Timer
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+Verify the selected timer can produce an ADC external trigger supported by
+STM32F103 ADC1.
 
-## Electrical Review
+Update:
 
-Check:
+- RCC clock;
+- timer instance;
+- TRGO selection;
+- ADC external trigger selection.
 
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
+## 4. Changing DMA Buffer Size
 
-## Port Validation Checklist
+The current design requires:
 
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+```text
+buffer >= 2
+buffer even
+buffer <= 65535
+```
+
+Block size is half the circular buffer.
+
+Recalculate RAM usage and block period.
+
+## 5. Changing DMA Channel
+
+DMA peripheral mapping is fixed by the MCU.
+
+Do not select a channel arbitrarily.
+
+Verify the reference mapping for the new ADC/peripheral.
+
+## 6. Changing the ADC Clock Limit
+
+The current SPL code explicitly selects:
+
+```text
+PCLK2 / 6
+```
+
+Review the target datasheet before changing the divider.
+
+A different MCU/family may have a different ADC clock specification.
+
+## 7. Changing Reference Voltage
+
+Update:
+
+```c
+BOARD_ADC_REFERENCE_MV
+```
+
+only if the assumption is truly valid.
+
+For accurate measurement, measure VDDA or use an internal reference-based
+calibration strategy.
+
+## 8. Multi-Channel ADC
+
+Enable scan mode and configure multiple ranks.
+
+Then define DMA data layout clearly:
+
+```text
+CH0, CH1, CH0, CH1, ...
+```
+
+Service should own channel extraction/aggregation.
+
+## 9. Changing IRQ Priority
+
+Review all interrupts in the final product.
+
+The DMA ISR must run often enough to publish blocks before data ownership is
+lost, but it should still remain short.
+
+## 10. Refactoring ISR Ownership
+
+If a reusable DMA abstraction is introduced, the strong DMA handler may move to
+that lower layer.
+
+Preserve the rule:
+
+```text
+ISR lives with the lowest owner of DMA1 Channel 1
+```
+
+Do not move the handler upward into Service/Application.
+
+## 11. Validation with Oscilloscope/Debug Pin
+
+For precise sample-rate validation, toggle a spare debug pin at block publish or
+use timer output where possible.
+
+Measure the expected block cadence:
+
+```text
+32 ms per published block at 1 kHz sampling
+```
+
+## 12. Validation Checklist
+
+- [ ] PA0/channel mapping correct;
+- [ ] ADC clock within limit;
+- [ ] calibration completes;
+- [ ] TIM3 frequency correct;
+- [ ] ADC conversions triggered externally;
+- [ ] DMA1 CH1 transfers;
+- [ ] HT/TC alternate;
+- [ ] sequence increases;
+- [ ] errors zero;
+- [ ] overruns zero at normal load;
+- [ ] voltage trend matches input;
+- [ ] hysteresis works.
+
+## 13. Common Pitfalls
+
+- using a GPIO digital mode instead of analog;
+- wrong ADC channel for the pin;
+- ADC clock too fast;
+- enabling continuous mode accidentally;
+- wrong external trigger;
+- wrong DMA channel;
+- forgetting circular mode;
+- doing statistics in the ISR;
+- ignoring block overrun;
+- assuming 3.300 V reference is exact.

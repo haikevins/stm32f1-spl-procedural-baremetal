@@ -1,129 +1,133 @@
-# Porting Guide - 07 - SPI W25Q64 Memory
+# Porting Guide — 07-spi-memory
 
-## Current Hardware Assumptions
+## 1. Changing SPI/CS Pins on STM32F103
 
+Update Board Memory Bus mappings:
 
-Wire the six-pin module:
+- SCK;
+- MISO;
+- MOSI;
+- CS;
+- GPIO clocks;
+- remap if required.
 
-```text
-STM32F103C8T6       W25Q64
---------------------------------
-3.3V        ------  VCC
-GND         ------  GND
-PA4         ------  CS
-PA5         ------  CLK
-PA6         ------  D1 / DO / MISO
-PA7         ------  D0 / DI / MOSI
+Keep W25Q64 ECUAL unchanged.
+
+## 2. Moving to SPI2
+
+Review:
+
+- SPI2 APB bus;
+- GPIO mapping;
+- RCC clock;
+- prescaler input clock;
+- SPL peripheral instance.
+
+The Memory Service and W25Q64 driver should remain unchanged.
+
+## 3. Changing SPI Frequency
+
+Update:
+
+```c
+BOARD_MEMORY_SPI_MAX_HZ
 ```
 
-Use 3.3 V supply and logic.
+The BSP selects a prescaler that does not exceed the configured maximum.
 
+Verify actual SCK with a logic analyzer.
 
-## Current Configuration Assumptions
+## 4. Using a Different Flash Capacity
 
+Review together:
 
-| Setting | Value |
-|---|---|
-| SPI | SPI1 |
-| CS | PA4 |
-| SCK | PA5 |
-| MISO | PA6 |
-| MOSI | PA7 |
-| SPI mode | 0 |
-| Maximum requested SPI clock | 5 MHz |
-| SPI polling timeout | 20 ms |
-| Power-on delay | 10 ms |
-| Page-program timeout | 50 ms |
-| Sector-erase timeout | 2000 ms |
-| Test sector | 0x007FF000 |
-| Test length | 32 bytes |
-| Heartbeat | 500 ms |
+- total size;
+- JEDEC capacity code;
+- address width;
+- page size;
+- sector size;
+- erase commands;
+- test sector.
 
-With the normal 72 MHz PCLK2, the BSP selects `/16`, producing 4.5 MHz.
+Do not change only the capacity ID.
 
+## 5. Changing the Test Sector
 
-## What Should Remain Portable
+Choose an aligned 4 KiB sector inside the device.
 
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
+Document that the region is destructive.
 
-```text
-app/
-services/
-common/
-```
+Verify it does not overlap boot/config/user data.
 
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
+## 6. Multi-Page Programming
 
-## What Usually Changes
+The current Page Program function refuses to cross one 256-byte page.
+
+A higher-level multi-page helper should split a buffer:
 
 ```text
-bsp/bluepill/
-config/
-config/modules.mk
+remaining bytes
+    |
+current page free space
+    |
+program chunk
+    |
+advance address
 ```
 
-A larger MCU change may also require:
+Do not remove the page-boundary check.
+
+## 7. Runtime Asynchronous Operation
+
+If long erase/program latency becomes unacceptable, convert the Memory Service
+to a state machine:
 
 ```text
-startup/
-linker/
-third_party/
-tools/openocd/
+start operation
+poll status in service_process()
+publish completion event
 ```
 
-## Pin/Peripheral Porting
+Keep SPI/device ownership below Application.
 
+## 8. Shared SPI Bus
 
-To use another SPI instance, update SCK/MISO/MOSI/CS mapping and the APB clock
-used for prescaler selection. To support another NOR geometry, review size,
-page size, sector size, JEDEC validation, address width, command set, and
-timeouts together.
+Add a bus-ownership mechanism if another SPI device shares SCK/MISO/MOSI.
 
+Each device keeps a separate CS.
 
-## Clock Review
+Bus configuration must remain compatible or be reconfigured safely per device.
 
-Never copy prescaler/baud/timer values blindly.
+## 9. Porting to Another MCU
 
-Verify:
+Keep:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+```text
+Memory Service -> W25Q64 ECUAL
+```
 
-## Interrupt Review
+Replace Board Memory Bus and vendor SPI implementation.
 
-If the peripheral or pin changes:
+## 10. Validation Checklist
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+- [ ] CS idle HIGH;
+- [ ] SPI mode 0 correct;
+- [ ] SCK below configured maximum;
+- [ ] JEDEC ID correct;
+- [ ] WEL sets after Write Enable;
+- [ ] BUSY clears after program/erase;
+- [ ] read-back matches;
+- [ ] test sector is safe/destructive by design;
+- [ ] layer checker passes.
 
-## Electrical Review
+## 11. Common Pitfalls
 
-Check:
-
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
-
-## Port Validation Checklist
-
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+- D0/D1 reversed;
+- using 5 V;
+- CS toggled between command and address/data;
+- wrong SPI mode;
+- forgetting dummy clocks on reads;
+- crossing page boundary;
+- not issuing Write Enable;
+- using an unbounded BUSY loop;
+- erasing data outside the documented test region.

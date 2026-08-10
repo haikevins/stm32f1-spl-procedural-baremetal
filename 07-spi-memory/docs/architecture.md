@@ -1,194 +1,184 @@
-# Architecture - 07 - SPI W25Q64 Memory
+# Architecture — 07-spi-memory
 
-## Runtime Dependency Direction
+## 1. Dependency Graph
 
 ```text
 Application
     |
-    v
-Services
+Memory Service
     |
-    +------> BSP
+W25Q64 ECUAL
     |
-    +------> ECUAL, when an external device exists
-                  |
-                  v
-          Board peripheral APIs
-                  |
-                  v
-            STM32F10x SPL
-                  |
-                  v
-              CMSIS/MCU
+Board Memory Bus
+    |
+SPI1/GPIO/RCC SPL
+
+Application
+    |
+Indication Service -> Board LED
+Application
+    |
+Time Service -> Board Timebase
 ```
 
-`system/` is the composition root and owns initialization order.
+## 2. External-Device Driver Composition
 
-## Example-Specific Data Flow
+Three concerns are deliberately separate:
 
+```text
+Application policy
+W25Q64 protocol
+STM32 SPI wiring
+```
 
-The destructive startup test uses the final 4 KiB sector:
+The Memory Service is the Application-facing API.
+
+The ECUAL driver owns W25Q64 semantics.
+
+The BSP owns SPI1/CS.
+
+## 3. Ownership Table
+
+| Concern | Owner |
+|---|---|
+| destructive test policy | Application |
+| logical memory operations | Memory Service |
+| JEDEC/status/erase/program/read | W25Q64 ECUAL |
+| PA4..PA7/SPI1 | Board Memory Bus |
+| SPI polling flags | Board Memory Bus |
+| LED result | Indication Service/BSP |
+| timeout clock | Time Service/Board Timebase |
+
+## 4. Synchronous Transaction Model
+
+Each ECUAL operation returns only after the required SPI transaction and,
+where applicable, internal flash BUSY polling are complete.
+
+That makes the API simple but means erase/program can occupy thread mode for a
+bounded interval.
+
+## 5. Poll Limits vs Timeouts
+
+This SPL implementation uses millisecond timeouts driven by the board timebase:
+
+```text
+SPI transaction: 20 ms
+page program: 50 ms
+sector erase: 2000 ms
+```
+
+These are wall-clock style timeouts, not loop-count limits.
+
+The timebase must therefore be functional before memory operations begin.
+
+## 6. Hardware Transaction Boundary
+
+The board bus owns:
+
+```text
+CS assertion
+SPI byte transfer
+CS deassertion
+```
+
+The ECUAL decides which bytes form one device command.
+
+This prevents protocol code from manipulating GPIO directly.
+
+## 7. Read/Write Semantics
+
+Read:
+
+```text
+no state change
+range validated
+```
+
+Program:
+
+```text
+1 -> 0 bit programming
+Write Enable required
+page boundary enforced
+BUSY polled
+```
+
+Erase:
+
+```text
+4 KiB aligned sector
+Write Enable required
+BUSY polled
+```
+
+## 8. Error Propagation
+
+Typical chain:
+
+```text
+SPI timeout
+    |
+board transfer false
+    |
+W25Q64 operation false
+    |
+Memory Service false
+    |
+Application diagnostic/error state
+```
+
+Initialization JEDEC failure propagates all the way to `system_panic()`.
+
+## 9. Concurrency
+
+SPI1 is used synchronously by one thread-mode path in this example.
+
+There is no SPI ISR and no shared bus arbitration.
+
+If another device later shares SPI1, explicit ownership/arbitration must be
+added.
+
+## 10. Startup Safety
+
+Board initialization:
+
+1. initializes timebase;
+2. configures LED;
+3. configures SPI/CS;
+4. waits memory power-on delay.
+
+Only then does Memory Service query JEDEC ID.
+
+CS is driven HIGH while idle.
+
+## 11. Destructive Boundary
+
+The self-test intentionally owns:
 
 ```text
 0x007FF000 .. 0x007FFFFF
 ```
 
-Sequence:
+That boundary must be documented and preserved if other firmware data is added.
+
+Do not let unrelated Application data overlap this region.
+
+## 12. Extension Strategy
+
+For a more capable storage subsystem:
 
 ```text
-JEDEC ID
-   |
-Sector Erase 0x20
-   |
-Write Enable + poll WEL
-   |
-poll BUSY until erase complete
-   |
-Page Program 0x02, 32 bytes
-   |
-poll BUSY
-   |
-Read Data 0x03
-   |
-byte-for-byte verify
-```
-
-If the test passes, PC13 toggles every 500 ms. If a memory operation or
-verification fails after initialization, the Application keeps PC13 steadily
-ON.
-
-
-## Module Responsibilities
-
-### Application
-
-Owns demo/product policy. It must not know physical pins, peripheral instances,
-SPL structures, or interrupt flags.
-
-### Services
-
-Translate board/external-device capabilities into stable application-facing
-APIs. Service logic is where debounce, filtering, aggregation, or logical
-indications belong.
-
-### BSP
-
-Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
-initialization, NVIC setup, and low-level ISR when applicable.
-
-### ECUAL
-
-Used only when this example communicates with an off-chip device. ECUAL owns
-the external device protocol and should depend on a board bus abstraction.
-
-### Common
-
-Contains portable helpers or shared types with no STM32 dependency.
-
-### System
-
-Initializes modules in dependency order and then runs the super-loop. It must
-not contain the example's behavior.
-
-## Initialization
-
-
-```text
-board_init()
-    |
-    +--> board_timebase_init()
-    +--> board_led_init()
-    +--> board_memory_bus_init()
-    |      +--> CS output HIGH
-    |      +--> PA5/PA7 AF push-pull
-    |      +--> PA6 floating input
-    |      +--> select SPI prescaler
-    |      +--> SPI1 mode 0
-    |
-    +--> 10 ms power-on delay
-
-memory_service_init()
-    |
-    +--> w25q64_init()
-            |
-            +--> wait BUSY clear
-            +--> command 0x9F
-            +--> read 3-byte JEDEC ID
-```
-
-The driver requires manufacturer `0xEF` and capacity code `0x17`. It records
-the memory-type byte but deliberately does not require one exact type value.
-
-
-## Low-Level Ownership
-
-
-The SPI BSP is polling. For every byte it:
-
-1. waits for TXE;
-2. writes the transmit byte or `0xFF` dummy byte;
-3. waits for RXNE;
-4. reads the received byte;
-5. after the transfer, waits for BSY to clear.
-
-Chip select is controlled explicitly by GPIO around each command transaction.
-
-The ECUAL validates address range and rejects Page Program operations that
-cross a 256-byte page boundary.
-
-
-## Interrupt Boundary
-
-The weak startup vector is overridden only by the module that owns the active
-interrupt source.
-
-The correct flow is:
-
-```text
-hardware interrupt
-    |
-lowest owning module ISR
-    |
-static low-level state
-    |
-normal thread-mode API
-    |
-Service
-    |
 Application
+    |
+Storage Service
+    |
+record/filesystem layer
+    |
+Memory Service
+    |
+W25Q64 ECUAL
+    |
+Board SPI
 ```
 
-The wrong flow is:
-
-```text
-ISR -> Application callback/state machine
-```
-
-## Concurrency Principles
-
-When state is shared between ISR and thread mode:
-
-- keep the shared object static and bounded;
-- mark asynchronously changed scalar state `volatile` where appropriate;
-- make multi-step read/clear operations atomic with a short critical section;
-- never hold interrupts disabled while performing slow peripheral operations;
-- make overflow/error behavior explicit.
-
-## Why This Separation Matters
-
-
-The Memory Service hides the concrete W25Q64 device from Application. The ECUAL
-owns NOR command semantics. The BSP owns SPI1 and CS pin transactions. This
-keeps board wiring and flash protocol concerns separate.
-
-
-## Dependency Enforcement
-
-Run:
-
-```bash
-make check-layers
-```
-
-A successful build should not require weakening the checker. If a new include
-is rejected, reconsider module placement before adding an exception.
+Keep erase/program geometry below the higher-level record policy.

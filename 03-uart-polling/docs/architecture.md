@@ -1,181 +1,118 @@
-# Architecture - 03 - UART Polling
+# Architecture — 03-uart-polling
 
-## Runtime Dependency Direction
+## 1. Dependency Graph
 
 ```text
 Application
     |
     v
-Services
+UART Service
     |
-    +------> BSP
+    v
+Board UART
     |
-    +------> ECUAL, when an external device exists
-                  |
-                  v
-          Board peripheral APIs
-                  |
-                  v
-            STM32F10x SPL
-                  |
-                  v
-              CMSIS/MCU
+    v
+GPIO/RCC/USART SPL
 ```
 
-`system/` is the composition root and owns initialization order.
+## 2. Responsibilities
 
-## Example-Specific Data Flow
+**Application**
 
+Owns greeting and echo state.
 
-The Application first sends:
+**UART Service**
 
-```text
-STM32F103 UART polling ready
-Type characters to echo.
+Provides a hardware-independent byte API.
+
+**Board UART**
+
+Owns USART1, PA9, PA10, baud configuration, and peripheral initialization.
+
+## 3. Public Contract
+
+The important contract is:
+
+```c
+bool uart_service_try_read_byte(uint8_t *byte);
+bool uart_service_try_write_byte(uint8_t byte);
 ```
 
-The message is not transmitted by a blocking string function. Each
-`application_process()` call attempts one byte when `TXE` is ready.
+`false` means "not completed now", not necessarily a fatal error.
 
-After the greeting, the state machine keeps at most one pending echo byte:
+This API shape supports cooperative thread-mode code.
 
-```text
-RXNE ready?
-    |
-    +--> read byte
-          |
-          v
-      pending echo
-          |
-TXE ready?
-    |
-    +--> write byte
-```
+## 4. Polling Ownership
 
-If hardware is not ready, the function simply returns to the super-loop.
+Polling occurs in the BSP because only the BSP knows USART1 status flags.
 
+Application does not read RXNE/TXE directly.
 
-## Module Responsibilities
+## 5. Error Handoff
 
-### Application
+The current Example 03 API intentionally does not distinguish:
 
-Owns demo/product policy. It must not know physical pins, peripheral instances,
-SPL structures, or interrupt flags.
+- no byte available;
+- detailed USART receive errors.
 
-### Services
+This keeps the baseline simple.
 
-Translate board/external-device capabilities into stable application-facing
-APIs. Service logic is where debounce, filtering, aggregation, or logical
-indications belong.
+Example 04 expands the low-level ownership with explicit error/overflow
+diagnostics.
 
-### BSP
+## 6. No Interrupt Concurrency
 
-Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
-initialization, NVIC setup, and low-level ISR when applicable.
+There is no USART ISR concurrency.
 
-### ECUAL
+UART state is accessed only from thread mode.
 
-Used only when this example communicates with an off-chip device. ECUAL owns
-the external device protocol and should depend on a board bus abstraction.
+This makes the example useful for understanding the basic peripheral before
+introducing rings and ISR ownership.
 
-### Common
+## 7. Timing Dependency
 
-Contains portable helpers or shared types with no STM32 dependency.
+The USART baud calculation depends on PCLK2.
 
-### System
+SPL handles BRR calculation, but the BSP still owns the responsibility to
+configure the correct clock tree before USART initialization.
 
-Initializes modules in dependency order and then runs the super-loop. It must
-not contain the example's behavior.
-
-## Initialization
-
+## 8. Initialization Dependency
 
 ```text
-board_init()
+System clock information
     |
-    +--> SystemCoreClockUpdate()
-    +--> board_uart_init()
-            |
-            +--> GPIOA + USART1 clocks
-            +--> PA9 AF push-pull
-            +--> PA10 floating input
-            +--> USART 115200 8N1
-            +--> RX + TX enable
-
-system_init()
+Board UART
     |
-    +--> uart_service_init()
-    +--> application_init()
-```
-
-`uart_service_init()` has no hardware work because the BSP already owns
-peripheral initialization.
-
-
-## Low-Level Ownership
-
-
-`board_uart_try_read_byte()` checks `USART_FLAG_RXNE`.
-
-`board_uart_try_write_byte()` checks `USART_FLAG_TXE`.
-
-There is no USART IRQ, no DMA, and no software queue. This makes the example a
-useful baseline for comparison with Example 04.
-
-
-## Interrupt Boundary
-
-The weak startup vector is overridden only by the module that owns the active
-interrupt source.
-
-The correct flow is:
-
-```text
-hardware interrupt
-    |
-lowest owning module ISR
-    |
-static low-level state
-    |
-normal thread-mode API
-    |
-Service
+UART Service
     |
 Application
 ```
 
-The wrong flow is:
+Application can send the greeting only after USART1 is enabled.
+
+## 9. Layer Boundary
+
+Application knows:
 
 ```text
-ISR -> Application callback/state machine
+read byte
+write byte
 ```
 
-## Concurrency Principles
+It does not know:
 
-When state is shared between ISR and thread mode:
-
-- keep the shared object static and bounded;
-- mark asynchronously changed scalar state `volatile` where appropriate;
-- make multi-step read/clear operations atomic with a short critical section;
-- never hold interrupts disabled while performing slow peripheral operations;
-- make overflow/error behavior explicit.
-
-## Why This Separation Matters
-
-
-The key lesson is API shape. The upper layers already use `try_read` and
-`try_write`, which means Example 04 can change the transport implementation to
-interrupt-driven rings while preserving a similar non-blocking Application
-model.
-
-
-## Dependency Enforcement
-
-Run:
-
-```bash
-make check-layers
+```text
+USART1
+PA9/PA10
+TXE/RXNE
+PCLK2
+BRR
 ```
 
-A successful build should not require weakening the checker. If a new include
-is rejected, reconsider module placement before adding an exception.
+## 10. Failure Path
+
+`board_uart_init()` is void in this example, so runtime bring-up failures are
+diagnosed by behavior/GDB rather than propagated through a status return.
+
+A future production-oriented wrapper could validate configuration and return
+`bool`, while preserving the same upper-layer API.

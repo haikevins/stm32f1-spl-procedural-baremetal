@@ -1,115 +1,131 @@
-# Porting Guide - 01 - Blink LED
+# Porting Guide — 01-blink-led
 
-## Current Hardware Assumptions
+## 1. Porting Goal
 
-
-The example uses the Blue Pill onboard LED connected to PC13. The board layer
-defines it as active-low:
+A successful port should preserve:
 
 ```text
-PC13 LOW  -> LED ON
-PC13 HIGH -> LED OFF
+Application -> Time Service / Indication Service
 ```
 
-No external components are required.
+while replacing only the hardware-specific implementation required by the new
+board or MCU.
 
+## 2. Porting to Another Blue Pill with the Same STM32F103
 
-## Current Configuration Assumptions
+Normally no source changes are required if:
 
+- the onboard LED is still PC13;
+- the system clock setup is compatible;
+- SWD/OpenOCD settings are unchanged.
 
-| Setting | Source | Value |
-|---|---|---|
-| Status LED | `board_pins.h` | PC13, active-low |
-| Timebase | `board_config.h` | 1000 Hz |
-| Application toggle period | `application_config.h` | 500 ms |
+Build and hardware-test before assuming board clones are electrically
+identical.
 
-`board_led_init()` presets the inactive output level before configuring the pin
-as push-pull output, then `indication_service_init()` explicitly requests the
-logical OFF state.
+## 3. Moving the LED to Another Pin
 
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
-
-```text
-app/
-services/
-common/
-```
-
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
-
-```text
-bsp/bluepill/
-config/
-config/modules.mk
-```
-
-A larger MCU change may also require:
-
-```text
-startup/
-linker/
-third_party/
-tools/openocd/
-```
-
-## Pin/Peripheral Porting
-
-
-To move the LED, change `bsp/bluepill/src/board_pins.h` and, if necessary, the
-GPIO clock. To change the timebase frequency, update `BOARD_TIMEBASE_HZ`, but
-keep the Service's millisecond semantics consistent or update the Service API
-accordingly.
-
-
-## Clock Review
-
-Never copy prescaler/baud/timer values blindly.
+Update BSP pin definitions and GPIO clock.
 
 Verify:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+- new GPIO port;
+- new pin;
+- RCC peripheral clock;
+- output mode;
+- active-low/active-high behavior.
 
-## Interrupt Review
+Application and Indication Service should remain unchanged.
 
-If the peripheral or pin changes:
+## 4. Changing the System Clock
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+Verify:
 
-## Electrical Review
+- `SystemInit()`;
+- `SystemCoreClockUpdate()`;
+- HSE definition;
+- clock tree.
 
-Check:
+The SysTick reload is derived from `SystemCoreClock`, so do not hard-code a new
+reload in Application.
 
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
+## 5. Changing the Timebase Frequency
 
-## Port Validation Checklist
+If the Time Service still claims millisecond units, keep the physical timebase
+at 1 kHz.
 
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
+If you change the physical tick frequency, either:
+
+- convert ticks to milliseconds in the BSP/Service, or
+- change the API semantics and every consumer consistently.
+
+## 6. Using a Timer Instead of SysTick
+
+Replace only the Board Timebase implementation.
+
+The Service can keep:
+
+```c
+uint32_t time_service_get_ms(void);
+```
+
+The Application should not care whether time comes from SysTick, TIM2, or
+another timer.
+
+## 7. Porting to Another STM32F1 MCU
+
+Review:
+
+- startup vector table;
+- linker memory;
+- system clock code;
+- GPIO availability;
+- SPL density/device defines;
+- SysTick/CMSIS compatibility.
+
+## 8. Porting to Another MCU Family
+
+Keep Application and Service APIs if possible.
+
+Replace:
+
+- BSP;
+- vendor peripheral layer;
+- startup;
+- linker;
+- clock implementation;
+- debug target configuration.
+
+## 9. Validation Checklist
+
 - [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+- [ ] reset reaches `main()`.
+- [ ] timebase increments at 1 ms.
+- [ ] logical LED OFF is correct at startup.
+- [ ] LED toggles every 500 ms.
+- [ ] one full blink period is about one second.
+- [ ] GDB can attach reliably.
+
+## 10. Common Mistakes
+
+- forgetting active-low polarity;
+- enabling the wrong GPIO clock;
+- assuming `SystemCoreClock` is correct without updating it;
+- changing the tick frequency but keeping millisecond names;
+- moving hardware calls into Application;
+- using a blocking delay to preserve blink behavior.
+
+## 11. Target State After Porting
+
+The desired final dependency still looks like:
+
+```text
+Application
+    |
+Services
+    |
+new BSP
+    |
+new low-level peripheral implementation
+```
+
+Only hardware-specific layers should know the new pin or MCU.

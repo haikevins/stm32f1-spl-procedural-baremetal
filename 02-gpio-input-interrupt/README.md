@@ -1,63 +1,77 @@
-# 02 - GPIO Input Interrupt
+# 02-gpio-input-interrupt — GPIO Input + EXTI + Debounce Outside the ISR
 
-## Purpose
+## 1. Learning Objectives
 
-Add an external push button on PA0, EXTI0 interrupt capture, a 30 ms thread-mode debounce state machine, and event consumption by Application.
+This example adds an interrupt-driven button without moving product behavior
+into the ISR.
 
-This project is independently buildable and uses the same layered architecture
-as the rest of the repository.
+You will learn:
 
-## Learning Goals
+- PA0 input with internal pull-up;
+- AFIO EXTI routing;
+- EXTI0 falling-edge interrupt;
+- NVIC priority;
+- ISR-to-thread event handoff;
+- debounce using timestamps;
+- atomic take-and-clear of a shared event flag;
+- logical LED control through a Service.
 
-By the end of this example, you should be able to:
+## 2. Wiring
 
-- trace initialization from `main()` through System, BSP, Services, and
-  Application;
-- identify which layer owns each physical peripheral;
-- explain the runtime data/control flow;
-- distinguish ISR work from thread-mode work where interrupts are used;
-- modify compile-time configuration without violating dependency direction;
-- debug the example from the hardware layer upward.
-
-## Hardware and Wiring
-
-
-Wire a normally-open push button:
+Use a normally-open push button:
 
 ```text
 PA0 ---- push button ---- GND
 ```
 
-The GPIO uses the internal pull-up. Therefore:
+PA0 uses the STM32 internal pull-up.
+
+Therefore:
 
 ```text
-released -> PA0 HIGH
-pressed  -> PA0 LOW
+released -> HIGH
+pressed  -> LOW
 ```
 
-The falling transition is routed to EXTI line 0. The onboard PC13 LED remains
-the output indicator.
+A press generates a falling edge on EXTI line 0.
 
+The onboard PC13 LED is the output indicator.
 
-## Compile-Time Configuration
+## 3. Behavior
 
+Each valid debounced button press toggles the PC13 LED exactly once.
 
-| Setting | Value |
-|---|---|
-| Button pin | PA0 |
-| Input mode | internal pull-up |
-| EXTI line | EXTI0 |
-| Edge | falling |
-| IRQ priority | 2 |
-| Debounce time | 30 ms |
-| Timebase | 1 ms |
-| Status LED | PC13 active-low |
+Expected behavior:
 
-The debounce interval is defined in `config/button_config.h`.
+- quick contact bounce should not cause multiple toggles;
+- holding the button should not repeatedly toggle;
+- a later release-and-press produces the next event.
 
+## 4. Configuration
 
-## Initialization Sequence
+Board mapping:
 
+```text
+Button: PA0
+EXTI line: 0
+IRQ: EXTI0_IRQn
+IRQ priority: 2
+Polarity: active-low
+```
+
+Timebase:
+
+```c
+#define BOARD_TIMEBASE_HZ (1000UL)
+```
+
+Debounce:
+
+```c
+#define BUTTON_DEBOUNCE_TIME_MS (30UL)
+```
+
+## 5. Initialization Flow
 
 ```text
 board_init()
@@ -66,12 +80,13 @@ board_init()
     +--> board_timebase_init()
     +--> board_button_init()
             |
-            +--> GPIOA + AFIO clocks
-            +--> PA0 input pull-up
-            +--> GPIO_EXTILineConfig()
-            +--> EXTI falling-edge config
-            +--> clear pending EXTI0
-            +--> NVIC priority + enable
+            +--> enable GPIOA + AFIO clocks
+            +--> configure PA0 input pull-up
+            +--> map GPIOA pin 0 to EXTI0
+            +--> configure falling edge
+            +--> clear pending EXTI
+            +--> set NVIC priority
+            +--> enable EXTI0 IRQ
 
 system_init()
     |
@@ -81,214 +96,235 @@ system_init()
     +--> application_init()
 ```
 
-`button_service_init()` discards any edge captured during startup.
+`button_service_init()` discards a stale edge that may have occurred during
+board setup.
 
+## 6. GPIO Input Pull-Up with SPL
 
-## Runtime Behavior
-
-
-The ISR does not debounce:
+The BSP configures PA0 as:
 
 ```text
-PA0 falling edge
+GPIO_Mode_IPU
+```
+
+The external switch connects the pin to GND when pressed.
+
+No external pull-up resistor is required for this example.
+
+The logical function:
+
+```c
+bool board_button_is_pressed(void);
+```
+
+converts the physical level into a boolean pressed state.
+
+## 7. AFIO + EXTI Setup
+
+The BSP:
+
+1. enables AFIO;
+2. calls `GPIO_EXTILineConfig()` to route GPIOA pin 0 to EXTI0;
+3. configures `EXTI_Mode_Interrupt`;
+4. selects `EXTI_Trigger_Falling`;
+5. clears stale pending state;
+6. enables the NVIC line.
+
+This routing step is required because EXTI line number alone does not encode the
+GPIO port.
+
+## 8. ISR Ownership
+
+`EXTI0_IRQHandler()` belongs to the Board Button module.
+
+It performs only:
+
+```text
+check EXTI0 pending
     |
-EXTI0_IRQHandler
+set s_press_edge_pending = true
     |
-    +--> set s_press_edge_pending
-    +--> clear EXTI pending bit
+clear EXTI0 pending bit
     |
 return
 ```
 
-Thread mode performs debounce:
+It does not debounce and does not call Application.
+
+## 9. Event Handoff from ISR to Thread Mode
+
+The ISR writes:
+
+```c
+static volatile bool s_press_edge_pending;
+```
+
+Thread mode consumes it through:
+
+```c
+bool board_button_take_press_edge(void);
+```
+
+The read-and-clear sequence is protected with PRIMASK:
+
+```text
+save interrupt state
+disable IRQ
+read flag
+clear flag
+restore previous interrupt state
+```
+
+This prevents losing an edge between reading and clearing the shared flag.
+
+## 10. Debounce Algorithm
+
+The Button Service owns debounce policy.
+
+When an edge is received:
+
+```text
+record current time
+set debounce active
+```
+
+Every later Service call checks elapsed time.
+
+Before 30 ms:
+
+```text
+return immediately
+```
+
+After 30 ms:
+
+```text
+sample physical button
+    |
+still pressed?
+    |
+    +--> yes -> publish one pressed event
+    +--> no  -> ignore as bounce/noise
+```
+
+A new falling edge restarts the debounce window.
+
+## 11. Application
+
+Application logic is intentionally tiny:
 
 ```text
 button_service_process()
     |
-    +--> take low-level edge?
-    |       |
-    |       +--> record start time, enable debounce
+take debounced pressed event?
     |
-    +--> 30 ms elapsed?
-            |
-            +--> no: return
-            |
-            +--> yes: sample PA0
-                       |
-                       +--> still pressed -> publish pressed event
+    +--> yes -> toggle INDICATION_STATUS
+```
 
-application_process()
+Application does not know about PA0, EXTI0, active-low input, or debounce
+timing.
+
+## 12. Architecture
+
+```text
+Application
     |
-    +--> take pressed event?
-            |
-            +--> toggle logical indicator
+    +--> Button Service ------> Board Button -----> EXTI/GPIO SPL
+    |
+    +--> Indication Service --> Board LED --------> GPIO SPL
+    |
+    +--> Time Service --------> Board Timebase ----> SysTick
 ```
 
-Every new falling edge restarts the debounce window, absorbing mechanical
-bounce without blocking the ISR or super-loop.
+## 13. Event Service
 
+This example does not require a generic queue.
 
-## SPL / Low-Level Behavior
+The Button Service exposes a one-event pending state because the product
+requirement is simply "one debounced press event."
 
+If multiple events must be retained, replace the boolean event with a counter or
+queue rather than adding work to the ISR.
 
-The board layer uses SPL EXTI/GPIO/RCC APIs and CMSIS NVIC primitives.
+## 14. Idle Behavior
 
-The ISR-owned/shared item is the `volatile bool s_press_edge_pending`. Thread
-mode clears it using a short PRIMASK-protected critical section so an
-interrupt cannot be lost between read and clear.
+The concrete example uses `__NOP()` in `system_idle()`.
 
-
-## Architectural Notes
-
-
-This example demonstrates the repository's interrupt ownership rule: the BSP
-owns EXTI0 because it owns the physical button. The Service owns debounce
-policy. The Application owns the decision that a debounced press toggles the
-status indication.
-
-
-## Interrupt and Concurrency Policy
-
-The project follows the repository-wide rule that an interrupt handler belongs
-to the lowest module that owns the peripheral. The ISR, when present, may clear
-flags, transfer low-level data, and record bounded state. Higher-level policy is
-processed later in normal thread mode.
-
-`system_idle()` in this concrete example executes `__NOP()` rather than
-`__WFI()`.
-
-## Test Procedure and Expected Result
-
-
-Flash the firmware, then press and release the PA0 button.
-
-Expected result:
-
-- one deliberate press toggles PC13 once;
-- holding the button does not repeatedly toggle;
-- contact bounce should not produce multiple toggles;
-- a new toggle occurs only after a later press edge.
-
-If one press causes many toggles, verify the button wiring and inspect the
-debounce timing. If there is no response, first break at `EXTI0_IRQHandler()`.
-
-
-## GDB Debugging
-
-
-```gdb
-break EXTI0_IRQHandler
-break button_service_process
-break indication_service_toggle
-continue
-```
-
-When stopped in the corresponding source file, inspect:
-
-```gdb
-p s_press_edge_pending
-p s_debounce_active
-p s_debounce_started_ms
-p s_pressed_event_pending
-```
-
-
+The CPU continuously executes the super-loop and immediately processes a button
+edge captured by the ISR.
 
 ## Build, Flash, and Debug
-
-Run the commands from the example directory.
 
 ```bash
 make check-layers
 make clean
 make
-```
-
-The build produces:
-
-```text
-build/firmware.elf
-build/firmware.hex
-build/firmware.bin
-build/firmware.lst
-build/firmware.map
-```
-
-Flash with OpenOCD:
-
-```bash
 make flash
 ```
 
-Erase the MCU flash if needed:
-
 ```bash
-make erase
-```
-
-Start an OpenOCD debug server:
-
-```bash
+# Terminal 1
 make debug-server
-```
 
-Then, in another terminal:
-
-```bash
+# Terminal 2
 make debug
 ```
 
-The Makefile prefers `arm-none-eabi-gdb` and falls back to `gdb-multiarch`.
+## 15. Step-by-Step Test
 
-The OpenOCD configuration uses SWD and:
+1. Power the board.
+2. Confirm PC13 is initially OFF.
+3. Press PA0 button once.
+4. Confirm PC13 toggles once.
+5. Hold the button; LED should not repeatedly toggle.
+6. Release.
+7. Press again; LED toggles once again.
+8. Set a breakpoint at `EXTI0_IRQHandler()` and verify one or more raw bounce
+   edges may occur while only one debounced Application event is produced.
 
-```tcl
-reset_config none
-adapter speed 1000
-```
+## 16. Troubleshooting
 
-This matches a common ST-Link connection where only `SWDIO`, `SWCLK`, `GND`,
-and `3.3V` are connected and NRST is not available.
+### Press Has No Effect
 
+Check:
 
-## Troubleshooting Method
+- button really connects PA0 to GND;
+- PA0 is HIGH when released;
+- EXTI0 handler is reached;
+- pending bit is cleared;
+- Button Service is being processed.
 
-Use a bottom-up approach:
+### LED Toggles Multiple Times per Press
 
-1. verify power and wiring;
-2. verify BSP pin/peripheral mapping;
-3. verify the peripheral clock is enabled;
-4. verify initialization succeeds;
-5. verify the low-level peripheral flag/interrupt/data path;
-6. verify Service state;
-7. verify Application policy.
+Check:
 
-Do not immediately modify Application code when the underlying peripheral is
-not yet proven to work.
+- debounce interval is 30 ms;
+- the Service, not the ISR, owns debounce;
+- there is no extra Application toggle path;
+- switch wiring is not floating.
 
-## Porting Notes
+### EXTI ISR Hits but LED Does Not Change
 
+Then the low-level edge path works.
 
-To move the button to another pin, update the GPIO port/pin, AFIO port source,
-EXTI line, IRQ vector, and priority in `board_pins.h`. If the new pin shares an
-EXTI group handler such as EXTI9_5, the BSP ISR must be changed accordingly.
+Inspect:
 
+- `s_press_edge_pending`;
+- Button Service debounce state;
+- physical button state after 30 ms;
+- pending debounced event;
+- Indication Service call.
 
-See [`docs/porting_guide.md`](docs/porting_guide.md) for a structured checklist.
+## 17. Extension Exercises
 
-## Further Exercises
+1. Add a released event.
+2. Add long-press detection.
+3. Add double-click detection.
+4. Replace the boolean ISR event with a counter.
+5. Move the button to another EXTI line.
+6. Add a second button sharing an EXTI group handler.
 
-Good next experiments include:
-
-- expose additional diagnostic counters through GDB;
-- add a second logical Service without letting Application include BSP headers;
-- deliberately inject a failure and trace how it propagates;
-- write a host-side test for portable Common or Service logic;
-- change one board resource and verify that Application does not need hardware
-  includes.
-
-## Related Documentation
+## 18. Related Documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
-- [`docs/adding_a_module.md`](docs/adding_a_module.md)
 - [`docs/porting_guide.md`](docs/porting_guide.md)

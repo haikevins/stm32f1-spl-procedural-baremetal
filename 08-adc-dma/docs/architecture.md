@@ -1,221 +1,161 @@
-# Architecture - 08 - ADC + DMA
+# Architecture — 08-adc-dma
 
-## Runtime Dependency Direction
+## 1. Hardware Data Path
 
 ```text
-Application
+TIM3 update
     |
     v
-Services
+ADC1 channel 0
     |
-    +------> BSP
+    v
+ADC1->DR
     |
-    +------> ECUAL, when an external device exists
-                  |
-                  v
-          Board peripheral APIs
-                  |
-                  v
-            STM32F10x SPL
-                  |
-                  v
-              CMSIS/MCU
+    v
+DMA1 Channel 1
+    |
+64-sample circular buffer
 ```
 
-`system/` is the composition root and owns initialization order.
+CPU intervention is not required for each individual sample.
 
-## Example-Specific Data Flow
-
-
-Data path:
+## 2. Software Dependency Graph
 
 ```text
-TIM3 update @ 1 kHz
-        |
-        v
-ADC1 conversion PA0
-        |
-        v
-DMA1 Channel 1 circular buffer [64]
-        |
-        +--> HT: samples 0..31
-        |
-        +--> TC: samples 32..63
-        |
-DMA1_Channel1_IRQHandler
-        |
-        +--> copy completed half into stable 32-sample block
-        +--> mark block ready
-        +--> count overrun/error
-        |
-thread mode
-        |
-adc_service_process()
-        |
-        +--> min
-        +--> max
-        +--> rounded average
-        +--> estimated millivolts
-        |
 Application
-        |
-        +--> diagnostics
-        +--> PC13 hysteresis
+    |
+    +--> ADC Service
+    |       |
+    |       v
+    |   Board ADC/DMA
+    |       |
+    |       v
+    |   ADC/DMA/TIM/GPIO SPL
+    |
+    +--> Indication Service
+            |
+            v
+         Board LED
 ```
 
-The ISR intentionally does not calculate statistics or apply LED policy.
+## 3. Ownership Table
 
+| Concern | Owner |
+|---|---|
+| sample timing | TIM3 / Board ADC-DMA |
+| ADC conversion | ADC1 / Board ADC-DMA |
+| DMA circular buffer | Board ADC-DMA |
+| DMA IRQ | Board ADC-DMA |
+| stable completed block | Board ADC-DMA |
+| average/min/max/mV | ADC Service |
+| threshold hysteresis | Application |
+| PC13 polarity | Board LED |
 
-## Module Responsibilities
+## 4. ISR Placement in the Current Code
 
-### Application
+`DMA1_Channel1_IRQHandler()` lives in the BSP source that owns ADC/DMA.
 
-Owns demo/product policy. It must not know physical pins, peripheral instances,
-SPL structures, or interrupt flags.
+This matches the repository rule.
 
-### Services
+The ISR does not call the ADC Service.
 
-Translate board/external-device capabilities into stable application-facing
-APIs. Service logic is where debounce, filtering, aggregation, or logical
-indications belong.
+## 5. Concurrency Zones
 
-### BSP
+Three memory zones exist:
 
-Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
-initialization, NVIC setup, and low-level ISR when applicable.
+1. DMA-owned circular buffer;
+2. BSP stable completed block;
+3. Service-owned processing buffer.
 
-### ECUAL
+The block-ready flag bridges ISR and thread mode.
 
-Used only when this example communicates with an off-chip device. ECUAL owns
-the external device protocol and should depend on a board bus abstraction.
+A short PRIMASK critical section protects take-and-clear/copy behavior.
 
-### Common
+## 6. Overrun Semantics
 
-Contains portable helpers or shared types with no STM32 dependency.
-
-### System
-
-Initializes modules in dependency order and then runs the super-loop. It must
-not contain the example's behavior.
-
-## Initialization
-
-
-`board_adc_dma_init()` performs:
+If a new DMA half completes while the previous stable block is still pending:
 
 ```text
-enable DMA1 / GPIOA / ADC1 / TIM3 clocks
-    |
-configure ADC clock PCLK2/6
-    |
-PA0 analog input
-    |
-DMA1 CH1:
-    peripheral = ADC1->DR
-    memory     = 64-sample buffer
-    16-bit peripheral + memory width
-    memory increment
-    circular mode
-    high priority
-    HT + TC + TE interrupts
-    |
-NVIC DMA1_Channel1
-    |
-ADC1:
-    independent
-    single regular channel
-    external TIM3 TRGO
-    right aligned
-    55.5-cycle sample time
-    |
-TIM3:
-    computed PSC/ARR
-    TRGO = update
-    |
-ADC calibration
-    |
-enable external trigger
-    |
-start TIM3
+s_overrun_count++
+new completed half replaces previous published block
 ```
 
-No ADC interrupt or TIM3 interrupt is required.
+The design prioritizes the newest block over preserving an unbounded backlog.
 
+## 7. Sampling Determinism
 
-## Low-Level Ownership
+Sample timing comes from TIM3 hardware, not super-loop execution.
 
-
-DMA uses circular mode and half-transfer/full-transfer interrupts.
-
-The BSP copies the completed half into a separate stable block before
-publishing it. If a new half arrives while the previous block is still pending,
-the overrun counter increments and the newest completed half replaces the
-published block.
-
-Thread mode copies the published block under a short PRIMASK critical section.
-
-Millivolts are estimated from:
+Therefore:
 
 ```text
-mV = average_raw * 3300 / 4095
+thread jitter != sample-time jitter
 ```
 
-The result is only as accurate as the `3300 mV` VDDA assumption.
+as long as the hardware pipeline continues running.
 
+Long interrupt masking can still affect DMA service latency and cause overrun.
 
-## Interrupt Boundary
+## 8. Service Decoupling
 
-The weak startup vector is overridden only by the module that owns the active
-interrupt source.
-
-The correct flow is:
+ADC Service receives a block of raw samples and converts it into:
 
 ```text
-hardware interrupt
-    |
-lowest owning module ISR
-    |
-static low-level state
-    |
-normal thread-mode API
-    |
-Service
-    |
-Application
+average_raw
+minimum_raw
+maximum_raw
+millivolts
+sequence
 ```
 
-The wrong flow is:
+Application does not know DMA buffer geometry.
+
+## 9. Error Propagation
+
+DMA transfer errors are counted in BSP and exposed through Service to
+Application debug globals.
+
+Calibration/configuration failure causes initialization failure and panic.
+
+## 10. Memory Use
+
+Major static sample storage:
 
 ```text
-ISR -> Application callback/state machine
+DMA buffer:       64 * 2 = 128 bytes
+completed block:  32 * 2 = 64 bytes
+Service buffer:   32 * 2 = 64 bytes
 ```
 
-## Concurrency Principles
+This intentionally trades RAM for simple ownership and stable processing.
 
-When state is shared between ISR and thread mode:
+## 11. Extension Options
 
-- keep the shared object static and bounded;
-- mark asynchronously changed scalar state `volatile` where appropriate;
-- make multi-step read/clear operations atomic with a short critical section;
-- never hold interrupts disabled while performing slow peripheral operations;
-- make overflow/error behavior explicit.
+### Multi-Channel Scan
 
-## Why This Separation Matters
+Interleave channels in the DMA stream and let Service deinterleave them.
 
+### No-Copy Ping-Pong
 
-This is the clearest producer/consumer example in the repository. Hardware and
-DMA continuously produce samples, the BSP converts interrupt completion into a
-stable block, the Service converts samples into a measurement, and Application
-owns only threshold policy.
+Process DMA halves directly with strict ownership and timing guarantees.
 
+This reduces copies but increases concurrency complexity.
 
-## Dependency Enforcement
+### Multiple-Block Queue
 
-Run:
+Queue block descriptors/data if every block must be retained.
 
-```bash
-make check-layers
+This increases RAM and overflow-policy complexity.
+
+## 12. Boundary Rule
+
+Keep this boundary:
+
+```text
+hardware sample movement -> BSP
+sample interpretation -> Service
+product threshold policy -> Application
 ```
 
-A successful build should not require weakening the checker. If a new include
-is rejected, reconsider module placement before adding an exception.
+Do not move ADC/DMA register/SPL details upward just to reduce the number of
+functions.

@@ -1,118 +1,102 @@
-# Porting Guide - 05 - Timer PWM
+# Porting Guide — 05-timer-pwm
 
-## Current Hardware Assumptions
+## 1. Changing Pin/Channel on the Same Timer
 
+Choose a valid TIM2 channel/pin mapping.
 
-Use an external LED:
+Update:
 
-```text
-PA0 / TIM2_CH1 ---- 330 ohm ---- LED anode
-GND --------------------------- LED cathode
+- GPIO pin;
+- timer channel;
+- corresponding SPL OC init/preload/set-compare functions.
+
+Verify alternate-function mapping.
+
+## 2. Moving to Another Timer
+
+Review:
+
+- APB1 vs APB2;
+- timer input clock;
+- counter width;
+- channel mapping;
+- RCC enable;
+- SPL function usage.
+
+Application/PWM Service should remain unchanged.
+
+## 3. Changing PWM Frequency
+
+Update:
+
+```c
+BOARD_PWM_FREQUENCY_HZ
 ```
-
-The onboard PC13 LED is not used for PWM.
-
-
-## Current Configuration Assumptions
-
-
-| Setting | Value |
-|---|---|
-| PWM timer | TIM2 |
-| Channel | CH1 |
-| Output pin | PA0 |
-| Timer target tick | 1 MHz |
-| PWM frequency | 1 kHz |
-| SysTick timebase | 1 kHz |
-| Duty unit | permille, 0..1000 |
-| Duty update period | 10 ms |
-| Duty step | 10 permille |
-
-The ramp therefore takes roughly 1 second from 0 to 100% and another second
-back to 0%.
-
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
-
-```text
-app/
-services/
-common/
-```
-
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
-
-```text
-bsp/bluepill/
-config/
-config/modules.mk
-```
-
-A larger MCU change may also require:
-
-```text
-startup/
-linker/
-third_party/
-tools/openocd/
-```
-
-## Pin/Peripheral Porting
-
-
-To use another PWM pin, select a timer/channel that is actually mapped to that
-pin on STM32F103 and update both GPIO and timer definitions. Re-check timer bus
-(APB1 vs APB2) and the ×2 timer clock rule.
-
-
-## Clock Review
-
-Never copy prescaler/baud/timer values blindly.
 
 Verify:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+```text
+timer_tick % pwm_frequency == 0
+```
 
-## Interrupt Review
+and that resulting period counts fit the timer.
 
-If the peripheral or pin changes:
+## 4. Changing Timer Resolution
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+Changing `BOARD_PWM_TIMER_TICK_HZ` affects the representable period and compare
+resolution.
 
-## Electrical Review
+Verify PSC and period ranges together.
 
-Check:
+## 5. Changing Fade Speed
 
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
+Change:
 
-## Port Validation Checklist
+```text
+PWM_BREATH_UPDATE_PERIOD_MS
+PWM_BREATH_STEP_PERMILLE
+```
 
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+Approximate one-way ramp duration:
+
+```text
+1000 / step * update_period
+```
+
+## 6. Active-Low PWM
+
+If the external load is active-low, handle polarity in the BSP/timer output
+configuration rather than changing Application duty semantics.
+
+## 7. Porting to Another MCU Family
+
+Keep:
+
+```text
+Application -> PWM Service
+```
+
+Replace Board PWM and low-level timer implementation.
+
+Re-check timer clock-tree behavior because the STM32F1 APB timer x2 rule may
+not apply identically.
+
+## 8. Validation Checklist
+
+- [ ] expected timer input clock measured/derived;
+- [ ] PWM frequency correct;
+- [ ] 0% really produces inactive output;
+- [ ] 100% really produces continuous active output;
+- [ ] duty changes smoothly;
+- [ ] preload behavior correct;
+- [ ] no timer ISR unexpectedly enabled;
+- [ ] layer checker passes.
+
+## 9. Common Pitfalls
+
+- forgetting APB timer x2;
+- using the wrong channel function;
+- selecting a pin not mapped to that timer channel;
+- period count exceeding timer width;
+- using 1000 directly as ARR instead of period-count minus one;
+- performing timer-register math in Application.

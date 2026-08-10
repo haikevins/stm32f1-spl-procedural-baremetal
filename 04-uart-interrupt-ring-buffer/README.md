@@ -1,181 +1,250 @@
-# 04 - UART Interrupt + Ring Buffer
+# 04-uart-interrupt-ring-buffer — USART1 Interrupt + RX/TX Ring Buffers
 
-## Purpose
+## 1. Learning Objectives
 
-Move USART1 byte transfer into an interrupt handler while keeping Application thread-mode logic non-blocking through static RX/TX ring buffers.
+This example upgrades Example 03 from polling-only byte transfer to
+interrupt-driven buffering.
 
-This project is independently buildable and uses the same layered architecture
-as the rest of the repository.
+You will learn:
 
-## Learning Goals
+- USART1 RXNE/TXE interrupts;
+- static single-producer/single-consumer ring buffers;
+- RX ISR producer vs thread consumer;
+- thread TX producer vs ISR consumer;
+- TXE interrupt enable/disable lifecycle;
+- receive error and overflow counters;
+- bounded Application work budget.
 
-By the end of this example, you should be able to:
+## 2. Wiring
 
-- trace initialization from `main()` through System, BSP, Services, and
-  Application;
-- identify which layer owns each physical peripheral;
-- explain the runtime data/control flow;
-- distinguish ISR work from thread-mode work where interrupts are used;
-- modify compile-time configuration without violating dependency direction;
-- debug the example from the hardware layer upward.
-
-## Hardware and Wiring
-
-
-The wiring and terminal settings are the same as Example 03:
+Same as Example 03:
 
 ```text
 PA9  USART1_TX  ---> USB-UART RX
 PA10 USART1_RX  <--- USB-UART TX
-GND              --- common GND
+GND              --- common ground
 ```
 
-Use `115200 8N1`, no hardware flow control.
+Terminal:
 
+```text
+115200 8N1
+no flow control
+```
 
-## Compile-Time Configuration
+## 3. Compile-Time Configuration
 
+```c
+#define BOARD_UART_BAUD_RATE      (115200UL)
+#define BOARD_UART_IRQ_PRIORITY   (5U)
+#define BOARD_UART_RX_BUFFER_SIZE (128U)
+#define BOARD_UART_TX_BUFFER_SIZE (128U)
+```
 
-| Setting | Value |
-|---|---|
-| USART | USART1 |
-| Baud | 115200 |
-| IRQ priority | 5 |
-| RX storage | 128 bytes |
-| TX storage | 128 bytes |
+Both rings use static storage.
 
-The `byte_ring_buffer` implementation uses a head/tail design in which one
-storage slot is reserved to distinguish full from empty. With 128 storage
-bytes, usable capacity is 127 bytes per ring.
+## 4. Ring-Buffer Model
 
+The generic ring buffer stores:
 
-## Initialization Sequence
+```text
+storage pointer
+storage_size
+head
+tail
+```
 
+The implementation reserves one slot.
+
+For a 128-byte storage array:
+
+```text
+usable capacity = 127 bytes
+```
+
+### RX Ring
+
+```text
+producer: USART1 ISR
+consumer: thread mode
+```
+
+### TX Ring
+
+```text
+producer: thread mode
+consumer: USART1 ISR
+```
+
+This is exactly the single-producer/single-consumer contract documented by the
+Common ring-buffer module.
+
+## 5. Empty and Full
+
+Empty:
+
+```text
+head == tail
+```
+
+Full:
+
+```text
+next(head) == tail
+```
+
+Reserving one slot avoids needing a shared element count.
+
+The implementation uses compiler memory barriers around publication/consumption
+of head/tail updates.
+
+## 6. Initialization Flow
 
 `board_uart_init()`:
 
-1. initializes RX and TX ring objects;
-2. clears error/overflow counters;
-3. configures PA9/PA10;
-4. configures USART1 115200 8N1;
-5. assigns and enables the USART1 NVIC interrupt;
-6. enables RXNE and USART error interrupts;
-7. leaves TXE interrupt disabled until data is queued;
-8. enables USART1.
+1. initializes RX ring;
+2. initializes TX ring;
+3. clears diagnostic counters;
+4. enables GPIOA + USART1 clocks;
+5. configures PA9/PA10;
+6. configures USART1 115200 8N1;
+7. sets NVIC priority;
+8. enables USART1 IRQ;
+9. enables RXNE interrupt;
+10. enables USART error interrupt;
+11. leaves TXE interrupt disabled;
+12. enables USART1.
 
-The Service remains a thin hardware-independent wrapper.
-
-
-## Runtime Behavior
-
-
-RX path:
+## 7. RX Interrupt Path
 
 ```text
-USART RXNE
+RX byte arrives
     |
 USART1_IRQHandler
     |
-    +--> read DR
-    +--> push byte into RX ring
-    +--> record error/overflow counters
+read SR
     |
-thread mode
+RXNE/error?
     |
+read DR
+    |
+push byte to RX ring
+    |
+overflow?
+    |
+increment counter
+```
+
+Reading SR followed by DR also participates in clearing STM32F1 receive
+conditions.
+
+Thread mode later calls:
+
+```c
 uart_service_try_read_byte()
 ```
 
-TX path:
+to pop from the RX ring.
+
+## 8. TX Interrupt Path
+
+Thread mode:
 
 ```text
-Application/Service try_write
+try_write(byte)
     |
 push into TX ring
     |
 enable TXE interrupt
-    |
-USART1_IRQHandler
-    |
-pop TX byte -> DR
-    |
-ring empty?
-    |
-    +--> disable TXE interrupt
 ```
 
-Application uses a fixed processing budget of 32 operations per
-`application_process()` call. This prevents one busy UART stream from owning
-the super-loop forever.
+ISR:
 
+```text
+TXE set + TXEIE enabled?
+    |
+pop TX ring
+    |
+    +--> byte exists -> write DR
+    |
+    +--> empty -> disable TXEIE
+```
 
-## SPL / Low-Level Behavior
+Disabling TXEIE when the ring becomes empty prevents an interrupt storm.
 
+## 9. Thread-Mode Write and TX-Start Race
 
-The ISR reads the USART status register once and handles receive/error state and
-TXE state.
+The producer pushes the byte before enabling TXEIE.
 
-Receive error bits counted are:
+If TXE is already set, enabling TXEIE immediately makes the USART interrupt
+eligible and transmission starts.
 
-- ORE;
-- NE;
-- FE;
-- PE.
+The TX ring's producer/consumer ownership prevents both contexts from updating
+the same index.
 
-An RX byte that arrives while the RX ring is full increments the overflow
-counter.
+## 10. Thread-Mode Read
 
-TXE interrupt is disabled when the transmit ring becomes empty, preventing an
-interrupt storm while TXE remains asserted.
+Thread mode only consumes the RX ring.
 
+The ISR only produces it.
 
-## Architectural Notes
+This separation avoids a general-purpose lock around every byte.
 
+## 11. RX Overflow Semantics
 
-This example makes ISR/thread ownership visible. The UART BSP owns the rings and
-the handler; upper layers never access USART registers or NVIC directly.
+If the RX ring is full when a new byte arrives:
 
-The generic byte ring buffer lives in `common/`, so it can be reused by other
-drivers without depending on UART or STM32.
+```text
+new byte is discarded
+s_rx_overflow_count++
+```
 
+The counter makes data loss observable.
 
-## Interrupt and Concurrency Policy
+No heap or dynamic ring expansion is attempted.
 
-The project follows the repository-wide rule that an interrupt handler belongs
-to the lowest module that owns the peripheral. The ISR, when present, may clear
-flags, transfer low-level data, and record bounded state. Higher-level policy is
-processed later in normal thread mode.
+## 12. Hardware Error Flags
 
-`system_idle()` in this concrete example executes `__NOP()` rather than
-`__WFI()`.
+The ISR tracks:
 
-## Test Procedure and Expected Result
+```text
+ORE  overrun error
+NE   noise error
+FE   framing error
+PE   parity error
+```
 
+Any receive error increments:
 
-Open a terminal at 115200 8N1.
+```c
+s_rx_error_count
+```
 
-Expected greeting:
+This counter is distinct from software ring overflow.
+
+## 13. Application Behavior
+
+The Application first queues the greeting:
 
 ```text
 STM32F103 UART interrupt + ring buffer ready
 Type characters to echo.
 ```
 
-Paste or type bursts of text. Echo should continue while the background ISR
-moves bytes.
+It uses:
 
-For a stress test, send data faster than the Application can consume and inspect
-the RX overflow counter.
-
-
-## GDB Debugging
-
-
-```gdb
-break USART1_IRQHandler
-break byte_ring_buffer_push
-break byte_ring_buffer_pop
-continue
+```c
+#define APPLICATION_PROCESS_BUDGET (32U)
 ```
+
+so one call cannot process an unlimited amount of UART work.
+
+After the greeting it echoes bytes.
+
+If TX temporarily becomes full, one received byte is kept in
+`s_echo_pending` until it can be queued.
+
+## 14. Debug Symbols
 
 Useful BSP state:
 
@@ -194,103 +263,124 @@ p s_echo_pending
 p/x s_echo_byte
 ```
 
+## 15. Interrupt Ownership
 
+`USART1_IRQHandler()` belongs to Board UART.
+
+The ISR:
+
+- transfers bytes;
+- updates low-level counters;
+- enables/disables TXE interrupt.
+
+It does not:
+
+- echo directly;
+- call UART Service;
+- call Application;
+- parse text.
+
+## 16. Architecture
+
+```text
+Application
+    |
+UART Service
+    |
+Board UART
+    |
+    +--> RX ring <---- USART1 IRQ
+    +--> TX ring ----> USART1 IRQ
+    |
+USART/GPIO/RCC SPL
+```
+
+The ring-buffer implementation lives in Common.
+
+## 17. Comparison with Example 03
+
+Example 03:
+
+```text
+thread polls hardware directly through BSP
+```
+
+Example 04:
+
+```text
+ISR moves bytes between hardware and rings
+thread consumes/produces rings
+```
+
+The Application-facing byte API remains non-blocking.
+
+## 18. Idle Behavior
+
+The example still uses `__NOP()`.
+
+UART transfer continues through interrupts even while thread mode is between
+Application calls.
 
 ## Build, Flash, and Debug
-
-Run the commands from the example directory.
 
 ```bash
 make check-layers
 make clean
 make
-```
-
-The build produces:
-
-```text
-build/firmware.elf
-build/firmware.hex
-build/firmware.bin
-build/firmware.lst
-build/firmware.map
-```
-
-Flash with OpenOCD:
-
-```bash
 make flash
 ```
 
-Erase the MCU flash if needed:
-
 ```bash
-make erase
-```
-
-Start an OpenOCD debug server:
-
-```bash
+# Terminal 1
 make debug-server
-```
 
-Then, in another terminal:
-
-```bash
+# Terminal 2
 make debug
 ```
 
-The Makefile prefers `arm-none-eabi-gdb` and falls back to `gdb-multiarch`.
+## 19. Stress Test
 
-The OpenOCD configuration uses SWD and:
+1. Open 115200 8N1 terminal.
+2. Verify greeting.
+3. Paste a large block of text.
+4. Observe echo.
+5. Inspect `s_rx_overflow_count`.
+6. Intentionally halt the MCU briefly while the sender continues.
+7. Resume and observe overflow/error diagnostics.
 
-```tcl
-reset_config none
-adapter speed 1000
-```
+## 20. Troubleshooting
 
-This matches a common ST-Link connection where only `SWDIO`, `SWCLK`, `GND`,
-and `3.3V` are connected and NRST is not available.
+### No Greeting
 
+Check USART initialization, PA9, NVIC, TX ring state, and whether TXEIE becomes
+enabled after the first queued byte.
 
-## Troubleshooting Method
+### Greeting Stops After the First Byte
 
-Use a bottom-up approach:
+Check:
 
-1. verify power and wiring;
-2. verify BSP pin/peripheral mapping;
-3. verify the peripheral clock is enabled;
-4. verify initialization succeeds;
-5. verify the low-level peripheral flag/interrupt/data path;
-6. verify Service state;
-7. verify Application policy.
+- `USART1_IRQHandler()` is reached;
+- TXE remains enabled while data exists;
+- ISR pops the TX ring;
+- TXEIE is not disabled prematurely.
 
-Do not immediately modify Application code when the underlying peripheral is
-not yet proven to work.
+### RX Overflow Increases
 
-## Porting Notes
+The Application is not consuming RX quickly enough relative to the sender.
 
+Options:
 
-When moving to another USART, update the physical mapping and IRQ name in the
-BSP. Verify the handler name exactly matches the startup vector. Recalculate IRQ
-priority policy if the project adds other real-time interrupt sources.
+- increase ring size;
+- reduce input rate;
+- improve Application budget;
+- add flow control at a higher design level.
 
+### Hardware Overrun/Error Increases
 
-See [`docs/porting_guide.md`](docs/porting_guide.md) for a structured checklist.
+Check baud mismatch, signal quality, host behavior, and whether interrupts are
+blocked too long elsewhere.
 
-## Further Exercises
-
-Good next experiments include:
-
-- expose additional diagnostic counters through GDB;
-- add a second logical Service without letting Application include BSP headers;
-- deliberately inject a failure and trace how it propagates;
-- write a host-side test for portable Common or Service logic;
-- change one board resource and verify that Application does not need hardware
-  includes.
-
-## Related Documentation
+## 21. Related Documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
-- [`docs/adding_a_module.md`](docs/adding_a_module.md)
 - [`docs/porting_guide.md`](docs/porting_guide.md)

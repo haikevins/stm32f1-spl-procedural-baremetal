@@ -1,129 +1,126 @@
-# Porting Guide - 06 - I2C SSD1306 Display
+# Porting Guide — 06-i2c-display
 
-## Current Hardware Assumptions
+## 1. Changing the OLED Address
 
+Change:
 
-Connect the four-pin OLED:
-
-```text
-Blue Pill      OLED
--------------------
-GND        --> GND
-3.3V       --> VCC
-PB6        --> SCL
-PB7        --> SDA
+```c
+BOARD_DISPLAY_I2C_ADDRESS_7BIT
 ```
 
-The example uses I2C1. The default 7-bit display address is `0x3C`.
+Typical values are `0x3C` or `0x3D`.
 
-Most common four-pin modules include pull-up resistors. If yours does not, SCL
-and SDA require pull-ups to 3.3 V.
+Do not use an 8-bit shifted address in a constant documented as 7-bit.
 
+## 2. Changing Bus Speed
 
-## Current Configuration Assumptions
+Update:
 
-
-| Setting | Value |
-|---|---|
-| I2C peripheral | I2C1 |
-| SCL | PB6 |
-| SDA | PB7 |
-| Address | 0x3C |
-| I2C clock | 400 kHz |
-| I2C transaction timeout | 20 ms |
-| OLED power-on delay | 100 ms |
-| Timebase | 1 ms |
-| Display | 128x64 |
-| Framebuffer | 1024 bytes |
-| Demo update | 100 ms |
-| Progress step | 2% |
-
-Change the address to `0x3D` in `board_config.h` only if the actual module uses
-that address.
-
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
-
-```text
-app/
-services/
-common/
+```c
+BOARD_DISPLAY_I2C_CLOCK_HZ
 ```
-
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
-
-```text
-bsp/bluepill/
-config/
-config/modules.mk
-```
-
-A larger MCU change may also require:
-
-```text
-startup/
-linker/
-third_party/
-tools/openocd/
-```
-
-## Pin/Peripheral Porting
-
-
-To move I2C pins or the peripheral, update the BSP mapping and bus
-initialization. To use another OLED controller, keep the board I2C bus and
-replace the ECUAL driver. To change display dimensions, framebuffer layout and
-rendering bounds must be reviewed together.
-
-
-## Clock Review
-
-Never copy prescaler/baud/timer values blindly.
 
 Verify:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+- device supports the speed;
+- pull-ups are strong enough;
+- rise time is acceptable;
+- actual PCLK1 is correct;
+- logic analyzer confirms SCL.
 
-## Interrupt Review
+## 3. Changing I2C Pins
 
-If the peripheral or pin changes:
+If staying on I2C1, verify whether remap is required.
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+Update:
 
-## Electrical Review
+- GPIO port;
+- SCL pin;
+- SDA pin;
+- GPIO clock;
+- AFIO remap if used.
 
-Check:
+## 4. Changing OLED Controller
 
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
+Keep the Board Display Bus.
 
-## Port Validation Checklist
+Replace the ECUAL driver and adapt the Display Service only if the logical
+drawing API must change.
 
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+## 5. Changing Resolution
+
+Review together:
+
+- width/height constants;
+- page count;
+- framebuffer size;
+- address-window commands;
+- clipping;
+- progress/text layout.
+
+Do not change only one dimension constant.
+
+## 6. Adding a Reset Pin
+
+Add reset mapping to BSP.
+
+Expose a board reset operation or integrate it into board/display
+initialization.
+
+Keep the reset pin out of Application.
+
+## 7. Changing Power-On Delay
+
+Adjust the configured delay based on actual module requirements.
+
+Do not remove the delay merely because one sample powers up quickly.
+
+## 8. Porting to Another MCU
+
+Preserve:
+
+```text
+Application -> Display Service -> SSD1306 ECUAL
+```
+
+Replace the Board Display Bus and low-level I2C implementation.
+
+## 9. Verification Checklist
+
+- [ ] correct address;
+- [ ] SDA/SCL idle HIGH;
+- [ ] SCL frequency correct;
+- [ ] address ACK received;
+- [ ] command writes succeed;
+- [ ] framebuffer write succeeds;
+- [ ] no I2C error flags;
+- [ ] display orientation correct;
+- [ ] layer checker passes.
+
+## 10. Logic Analyzer Checklist
+
+Capture:
+
+```text
+START
+address + W
+ACK
+control byte
+payload
+STOP
+```
+
+For data updates, verify control byte `0x40`.
+
+For command sequences, verify `0x00`.
+
+## 11. Common Pitfalls
+
+- confusing 7-bit and shifted I2C address;
+- no pull-ups;
+- using push-pull instead of open-drain;
+- swapped SDA/SCL;
+- incorrect display resolution;
+- omitting power-on delay;
+- allowing an unbounded BUSY wait;
+- letting Application include SSD1306 or I2C headers directly.

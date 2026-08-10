@@ -1,170 +1,125 @@
-# Architecture - 05 - Timer PWM
+# Architecture — 05-timer-pwm
 
-## Runtime Dependency Direction
+## 1. Dependency Graph
 
 ```text
 Application
     |
-    v
-Services
+    +--> PWM Service
+    |       |
+    |       v
+    |    Board PWM
+    |       |
+    |       v
+    |    TIM2/GPIO SPL
     |
-    +------> BSP
-    |
-    +------> ECUAL, when an external device exists
-                  |
-                  v
-          Board peripheral APIs
-                  |
-                  v
-            STM32F10x SPL
-                  |
-                  v
-              CMSIS/MCU
+    +--> Time Service
+            |
+            v
+       Board Timebase
+            |
+            v
+          SysTick
 ```
 
-`system/` is the composition root and owns initialization order.
+## 2. Ownership
 
-## Example-Specific Data Flow
+| Concern | Owner |
+|---|---|
+| desired breathing shape | Application |
+| logical duty API | PWM Service |
+| PA0/TIM2_CH1 mapping | Board PWM |
+| timer clock calculation | Board PWM |
+| PSC/ARR/CCR configuration | Board PWM |
+| 1 ms scheduling time | Board Timebase |
 
+## 3. Hardware vs Software Timing
 
-TIM2 generates the waveform continuously in hardware.
-
-Every 10 ms the Application changes its desired duty by 10 permille:
+Two different time scales exist:
 
 ```text
-0 -> 10 -> ... -> 1000 -> 990 -> ... -> 0 -> repeat
+1 kHz PWM carrier -> TIM2 hardware
+10 ms duty update -> Application scheduling
 ```
 
-`pwm_service_set_duty_permille()` passes the logical duty to the BSP.
+The CPU does not toggle PA0 at 1 kHz.
 
-The BSP calculates compare counts with rounding:
+This separation minimizes timing jitter and CPU load.
+
+## 4. Why Permille at the Service Boundary
+
+Permille:
 
 ```text
-compare = duty_permille * period_counts / 1000
+0..1000
 ```
 
-No TIM2 interrupt is needed.
+is independent from:
 
+- ARR;
+- timer width;
+- timer input clock;
+- PWM frequency.
 
-## Module Responsibilities
+That makes the Application/Service contract portable across different timer
+implementations.
 
-### Application
+## 5. Clock Ownership
 
-Owns demo/product policy. It must not know physical pins, peripheral instances,
-SPL structures, or interrupt flags.
+The BSP owns clock-tree interpretation.
 
-### Services
+Application asks for behavior in milliseconds and logical duty.
 
-Translate board/external-device capabilities into stable application-facing
-APIs. Service logic is where debounce, filtering, aggregation, or logical
-indications belong.
+The Board PWM converts the current PCLK/timer clock into PSC/ARR.
 
-### BSP
+## 6. Preload Semantics
 
-Owns the Blue Pill mapping, clock enable, GPIO configuration, STM32 peripheral
-initialization, NVIC setup, and low-level ISR when applicable.
+CCR1 and ARR preload ensure updates are synchronized to timer update events.
 
-### ECUAL
+Without preload, changing compare mid-period may create one abnormal pulse.
 
-Used only when this example communicates with an off-chip device. ECUAL owns
-the external device protocol and should depend on a board bus abstraction.
+## 7. ISR Policy
 
-### Common
+No TIM2 ISR is required.
 
-Contains portable helpers or shared types with no STM32 dependency.
+Hardware PWM should remain hardware-driven unless the product explicitly needs
+interrupt-time behavior at PWM events.
 
-### System
+SysTick ISR remains minimal and only increments time.
 
-Initializes modules in dependency order and then runs the super-loop. It must
-not contain the example's behavior.
+## 8. Failure Handling
 
-## Initialization
+`board_pwm_init()` validates:
 
+- non-zero timer/frequency configuration;
+- exact divisibility for timer tick;
+- 16-bit prescaler range;
+- 16-bit period range.
 
-`board_pwm_init()` determines the TIM2 input clock through
-`RCC_GetClocksFreq()`. Because TIM2 is on APB1, it doubles PCLK1 when the APB1
-prescaler is not 1.
-
-The BSP then calculates:
+Failure propagates:
 
 ```text
-prescaler divider = timer_clock / 1 MHz
-period counts     = 1 MHz / 1 kHz = 1000
+board_pwm_init() -> false
+board_init() -> false
+system_init() -> false
+system_panic()
 ```
 
-TIM2 CH1 is configured for PWM mode 1 with output and preload enabled.
+## 9. Extension Boundary
 
-The board then starts the 1 ms SysTick timebase used only to decide when the
-Application changes duty.
+Good extension points:
 
+- waveform shape -> Application;
+- logical duty behavior -> Service;
+- timer/channel/pin -> BSP;
+- timer implementation -> lower layer/SPL.
 
-## Low-Level Ownership
+## 10. What Not to Do
 
+Avoid:
 
-Important SPL concepts:
-
-- `TIM_TimeBaseInit()` sets PSC/ARR;
-- `TIM_OC1Init()` selects PWM1;
-- `TIM_OC1PreloadConfig()` enables CCR preload;
-- `TIM_ARRPreloadConfig()` enables ARR preload;
-- `TIM_SetCompare1()` updates duty;
-- `TIM_Cmd()` starts TIM2.
-
-SysTick is a separate scheduler timebase and does not generate the PWM waveform.
-
-
-## Interrupt Boundary
-
-The weak startup vector is overridden only by the module that owns the active
-interrupt source.
-
-The correct flow is:
-
-```text
-hardware interrupt
-    |
-lowest owning module ISR
-    |
-static low-level state
-    |
-normal thread-mode API
-    |
-Service
-    |
-Application
-```
-
-The wrong flow is:
-
-```text
-ISR -> Application callback/state machine
-```
-
-## Concurrency Principles
-
-When state is shared between ISR and thread mode:
-
-- keep the shared object static and bounded;
-- mark asynchronously changed scalar state `volatile` where appropriate;
-- make multi-step read/clear operations atomic with a short critical section;
-- never hold interrupts disabled while performing slow peripheral operations;
-- make overflow/error behavior explicit.
-
-## Why This Separation Matters
-
-
-This example separates scheduling from signal generation. SysTick tells the
-Application when to change state; TIM2 owns the precise PWM edges. That pattern
-scales better than software-toggling a GPIO at PWM frequency.
-
-
-## Dependency Enforcement
-
-Run:
-
-```bash
-make check-layers
-```
-
-A successful build should not require weakening the checker. If a new include
-is rejected, reconsider module placement before adding an exception.
+- calculating CCR values in Application;
+- hard-coding a 72 MHz clock in Application;
+- software-toggling PA0 for PWM;
+- putting a breathing state machine in a timer ISR;
+- exposing `TIM_OCInitTypeDef` to Services.

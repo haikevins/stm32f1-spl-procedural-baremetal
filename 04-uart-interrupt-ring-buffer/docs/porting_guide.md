@@ -1,116 +1,153 @@
-# Porting Guide - 04 - UART Interrupt + Ring Buffer
+# Porting Guide — 04-uart-interrupt-ring-buffer
 
-## Current Hardware Assumptions
+## 1. Parts That Can Remain Unchanged
 
-
-The wiring and terminal settings are the same as Example 03:
-
-```text
-PA9  USART1_TX  ---> USB-UART RX
-PA10 USART1_RX  <--- USB-UART TX
-GND              --- common GND
-```
-
-Use `115200 8N1`, no hardware flow control.
-
-
-## Current Configuration Assumptions
-
-
-| Setting | Value |
-|---|---|
-| USART | USART1 |
-| Baud | 115200 |
-| IRQ priority | 5 |
-| RX storage | 128 bytes |
-| TX storage | 128 bytes |
-
-The `byte_ring_buffer` implementation uses a head/tail design in which one
-storage slot is reserved to distinguish full from empty. With 128 storage
-bytes, usable capacity is 127 bytes per ring.
-
-
-## What Should Remain Portable
-
-Try to keep these layers unchanged when moving to another board with equivalent
-functionality:
+When only the physical UART changes, these parts can normally remain:
 
 ```text
 app/
 services/
-common/
+common/byte_ring_buffer
 ```
 
-For an external-device example, also keep `ecual/` unchanged when the external
-device and protocol remain the same.
-
-## What Usually Changes
+Keep the same logical contract:
 
 ```text
-bsp/bluepill/
-config/
-config/modules.mk
+try_read
+try_write
+can_read
+can_write
 ```
 
-A larger MCU change may also require:
+Replace only the Board UART implementation and configuration.
+
+## 2. Changing the USART Instance
+
+Moving from USART1 to USART2/USART3 requires review of:
+
+- peripheral instance;
+- RCC bus/clock;
+- GPIO pins;
+- alternate-function/remap;
+- IRQ number;
+- strong handler name.
+
+Remember USART1 is on APB2 while USART2/USART3 are on APB1.
+
+## 3. Changing Buffer Size
+
+Update:
+
+```c
+BOARD_UART_RX_BUFFER_SIZE
+BOARD_UART_TX_BUFFER_SIZE
+```
+
+The ring reserves one slot, so usable capacity is:
 
 ```text
-startup/
-linker/
-third_party/
-tools/openocd/
+N - 1
 ```
 
-## Pin/Peripheral Porting
+Check total SRAM usage after increasing buffers.
 
+## 4. Changing IRQ Priority
 
-When moving to another USART, update the physical mapping and IRQ name in the
-BSP. Verify the handler name exactly matches the startup vector. Recalculate IRQ
-priority policy if the project adds other real-time interrupt sources.
+Review the priority relative to:
 
+- SysTick;
+- DMA;
+- EXTI;
+- other communication peripherals.
 
-## Clock Review
+Priority does not justify a long ISR. Keep byte movement bounded.
 
-Never copy prescaler/baud/timer values blindly.
+## 5. Changing Baud/Data Format
 
-Verify:
+Update:
 
-- `SystemCoreClock`;
-- PCLK1 and PCLK2;
-- APB timer ×2 rule;
-- selected peripheral bus;
-- generated baud/sample/PWM/bus frequency;
-- timeout assumptions.
+```text
+baud
+word length
+parity
+stop bits
+flow control
+```
 
-## Interrupt Review
+in the BSP USART configuration.
 
-If the peripheral or pin changes:
+Verify the host terminal uses matching settings.
 
-- verify IRQ vector name;
-- verify EXTI line grouping if relevant;
-- verify NVIC priority;
-- verify pending flag clear sequence;
-- verify the startup table contains the correct handler symbol.
+## 6. Changing TX/RX Pins
 
-## Electrical Review
+Update BSP pin mapping.
 
-Check:
+If alternate-function remap is required, configure AFIO.
 
-- logic voltage;
-- common ground;
-- pull-up/pull-down requirements;
-- current limiting;
-- analog input range;
-- external-device power-up timing;
-- bus line direction.
+Do not expose pin changes to UART Service/Application.
 
-## Port Validation Checklist
+## 7. Porting to DMA UART
 
-- [ ] New hardware mapping is documented.
-- [ ] `config/modules.mk` contains required SPL source files.
-- [ ] `make check-layers` passes.
-- [ ] Firmware builds with no new architecture exceptions.
-- [ ] Peripheral initialization succeeds.
-- [ ] Expected observable behavior is reproduced.
-- [ ] GDB diagnostics show expected internal state.
-- [ ] Failure cases are still bounded and recoverable as designed.
+Preserve the upper API if possible:
+
+```text
+Application -> UART Service
+```
+
+Replace the Board UART data movement with DMA/ring/block logic.
+
+Define clearly:
+
+- DMA channel ownership;
+- TX completion semantics;
+- RX circular-buffer handoff;
+- overflow policy.
+
+## 8. Concurrency Validation
+
+Verify the single-producer/single-consumer contract:
+
+RX:
+
+```text
+ISR/DMA producer
+thread consumer
+```
+
+TX:
+
+```text
+thread producer
+ISR/DMA consumer
+```
+
+Do not add a second producer without redesigning synchronization.
+
+Stress-test ring wraparound and temporary thread stalls.
+
+## 9. Symbol Validation
+
+After porting, verify the intended strong handler is linked.
+
+Examples:
+
+```text
+USART2_IRQHandler
+USART3_IRQHandler
+```
+
+The old `USART1_IRQHandler` should no longer be the active owner if USART1 is
+not used.
+
+Use the ELF/map/symbol table as needed.
+
+## 10. Common Pitfalls
+
+- changing USART instance but not IRQ handler name;
+- wrong APB clock assumption;
+- forgetting AFIO remap;
+- ring storage size interpreted as usable capacity;
+- leaving TXE interrupt permanently enabled;
+- two producers modifying one ring;
+- losing bytes without an overflow counter;
+- moving protocol parsing into the ISR.
