@@ -1,400 +1,161 @@
-# Template Architecture and Dependency Rules
+# Architecture — Project Template
 
-## 1. Runtime Layers
+> **Scope:** Architectural rules that all examples inherit: dependency direction, startup/linker ownership, composition, interrupt handoff, static memory, configuration, and validation boundaries.
 
-```text
-Application
-    |
-    v
-Services
-    |
-    +------> BSP
-    |
-    +------> ECUAL
-                  |
-                  v
-          STM32F10x SPL
-                  |
-                  v
-               CMSIS
-                  |
-                  v
-            STM32F103
+[← Root](../../README.md) · [← Template README](../README.md) · [Adding a module](adding_a_module.md) · [Porting guide](porting_guide.md)
+
+## Table of contents
+
+- [Architectural goals](#architectural-goals)
+- [Layer responsibilities](#layer-responsibilities)
+- [Allowed dependency direction](#allowed-dependency-direction)
+- [Composition root](#composition-root)
+- [Startup and memory ownership](#startup-and-memory-ownership)
+- [Interrupt and thread-mode handoff](#interrupt-and-thread-mode-handoff)
+- [Shared-state rules](#shared-state-rules)
+- [Configuration and vendor isolation](#configuration-and-vendor-isolation)
+- [Validation and architectural checks](#validation-and-architectural-checks)
+- [References](#references)
+
+## Architectural goals
+
+The template is optimized for **explicit reasoning**, not minimum file count. Its architecture tries to make four contracts visible:
+
+1. **dependency contract** — higher policy depends on stable capabilities, not board/vendor details;
+2. **lifecycle contract** — reset, C memory initialization, module initialization, loop, and panic have explicit owners;
+3. **concurrency contract** — every ISR/shared buffer has a named producer/consumer and publication rule;
+4. **resource contract** — pins, peripheral instances, clocks, interrupts, DMA channels, and external-device buses have one lower-layer owner.
+
+## Layer responsibilities
+
+| Layer | Owns | Must not own |
+|---|---|---|
+| Application | product/demo policy, high-level state | SPL structs, board pins, IRQ flag clearing |
+| Services | logical capabilities, qualification/aggregation | hard-coded physical board mapping |
+| ECUAL | external-device commands/protocol/state | STM32 pin identities, product policy |
+| BSP | pins, buses, STM32 peripheral resources, lowest ISR | product behavior |
+| Common | portable data structures/types/algorithms | device headers |
+| Config | compile-time policy and selected modules | runtime behavior |
+| System | initialization order, `main`, idle/panic wiring | product state machine |
+| Platform/Runtime | architecture/runtime-specific extensions when needed | arbitrary catch-all code |
+| Vendor | SPL/CMSIS implementation | first-party policy |
+
+## Allowed dependency direction
+
+```mermaid
+flowchart TD
+    APP["app"] --> SVC["services"]
+    APP --> COMMON["common"]
+    SVC --> BSP["bsp"]
+    SVC --> ECUAL["ecual"]
+    SVC --> COMMON
+    ECUAL --> BSP
+    ECUAL --> COMMON
+    BSP --> COMMON
+    BSP --> VENDOR["SPL/CMSIS"]
+    SYSTEM["system composition root"] --> APP
+    SYSTEM --> SVC
+    SYSTEM --> ECUAL
+    SYSTEM --> BSP
 ```
 
-`system/` is the composition root rather than a dependency layer consumed by
-Application.
+`tools/scripts/check_layers.py` parses local include relationships and rejects forbidden layer edges. That makes architecture part of CI/build behavior rather than prose only.
 
-## 2. Dependency Matrix
+## Composition root
 
-| Source layer | Allowed project dependencies |
-|---|---|
-| Application | Application, Services, Common, Config |
-| Services | Services, BSP, ECUAL, Common, Config |
-| ECUAL | ECUAL, BSP, Common, Config |
-| BSP | BSP, Common, Vendor, Config |
-| Common | Common, Config |
-| Platform | Platform, Common, Vendor, Config |
-| Runtime | Runtime, Common, Vendor, Config |
-| System | All runtime layers + Vendor + Config |
-
-The layer checker classifies STM32F10x SPL and CMSIS headers as Vendor.
-
-## 3. Application
-
-Application owns product/demo policy and state machines.
-
-### Good
+`system/system_init.c` is allowed to know all public module APIs because its job is to compose them. Initialization should move from physical dependencies upward:
 
 ```text
-if button event -> toggle logical indicator
-if 500 ms elapsed -> advance state
-if voltage > threshold -> set logical output
+clock/pin/peripheral storage
+          ↓
+BSP resource initialized
+          ↓
+external device / Service initialized
+          ↓
+Application initialized last
 ```
 
-### Bad
+An interrupt must not be enabled before its state/buffer is ready. A Service must not call an ECUAL/BSP dependency before that dependency is initialized.
+
+## Startup and memory ownership
+
+`startup_stm32f10x_md.S` owns the vector table and reset code. The linker script supplies section symbols used by Reset_Handler.
+
+```mermaid
+sequenceDiagram
+    participant CPU as Cortex-M3
+    participant START as Reset_Handler
+    participant LINK as Linker-defined symbols
+    participant CMSIS as SystemInit
+    participant SYS as Project main/system
+
+    CPU->>START: reset vector
+    START->>LINK: _sidata, _sdata, _edata
+    START->>START: copy initialized data to SRAM
+    START->>LINK: _sbss, _ebss
+    START->>START: zero BSS
+    START->>CMSIS: configure clock tree
+    START->>SYS: main()
+```
+
+The linker models 64 KiB Flash and 20 KiB SRAM, keeps the vector table, assigns `.data` load/run addresses, allocates `.bss`, reserves stack headroom, and defines zero linker heap. Static allocation still needs review because automatic stack usage is not fully proven by a linker memory total.
+
+## Interrupt and thread-mode handoff
+
+Choose the publication primitive to match the event semantics:
 
 ```text
-GPIO_ResetBits(GPIOC, GPIO_Pin_13)
-USART_SendData(USART1, byte)
-DMA_Cmd(DMA1_Channel1, ENABLE)
+single/coalescing event       -> boolean flag
+counted diagnostics/events    -> counter
+continuous byte stream        -> SPSC ring
+periodic sample blocks        -> ping-pong/staging block or queue
+complex long operation        -> thread-mode state machine
 ```
 
-Those are lower-layer implementation details.
+The lowest layer that owns the interrupt source implements the exact strong handler symbol from the vector table. ISR work should be bounded: snapshot/clear flags, move a bounded datum, update diagnostics, publish work, return.
 
-## 4. Services
+## Shared-state rules
 
-Services expose hardware-independent capabilities such as:
+`volatile` means accesses must remain observable to the abstract machine; it does **not** make a compound sequence atomic and does not replace an ownership model.
 
-- time;
-- indication;
-- debounced button events;
-- UART bytes;
-- PWM duty;
-- display operations;
-- memory operations;
-- ADC measurements.
+Repository patterns include:
 
-Services may filter, debounce, aggregate, or translate units, but must not
-become a second BSP.
+- PRIMASK-protected take-and-clear for EXTI event publication;
+- fixed SPSC producer/consumer roles for UART rings;
+- compiler barriers at ring publication boundaries;
+- PRIMASK-protected copy/take of a DMA staging block;
+- overwrite-and-count policy when the ADC latest-block slot is already pending.
 
-## 5. BSP
+Before adding shared state, write down producer, consumer, lifetime, capacity, overflow/drop policy, and atomicity requirement.
 
-BSP owns Blue Pill hardware mapping:
+## Configuration and vendor isolation
 
-- GPIO port/pin;
-- active polarity;
-- peripheral instance;
-- RCC clock;
-- timer channel;
-- IRQ line and priority;
-- low-level interrupt handler for owned resources.
+`config/` holds project constants such as baud, timebase, debounce, timer rates, timeouts, thresholds, and `config/modules.mk` vendor source selection. SPL `*_InitTypeDef` structures remain below BSP/low-level boundaries.
 
-BSP may call SPL/CMSIS directly.
+That isolation lets a Service API survive a change from polling to IRQ/DMA or from one board mapping to another.
 
-## 6. ECUAL
+## Validation and architectural checks
 
-ECUAL owns protocols for off-chip devices such as SSD1306 and W25Q64.
+Validation should proceed from low-level contracts upward:
 
-### Transport Callback Pattern
+1. layer checker passes;
+2. startup/linker reach `main` and initialize memory correctly;
+3. core/bus clocks match assumptions;
+4. GPIO electrical states are safe;
+5. peripheral basic transaction works;
+6. interrupt/DMA publication works under load;
+7. Service semantics match policy;
+8. Application behavior and failure paths are observable;
+9. map/size and stack headroom are reviewed.
 
-In this SPL repository the external-device driver normally calls a board-bus
-API:
+The layer checker currently passes for the template and all eight completed examples in this repository snapshot.
 
-```text
-ECUAL
-  |
-  v
-Board Bus
-  |
-  v
-SPL peripheral
-```
+## References
 
-This prevents SSD1306/W25Q64 code from depending on a particular STM32 pin map.
-
-## 7. SPL Peripheral Layer
-
-STM32F10x SPL acts as the MCAL-equivalent peripheral implementation.
-
-It provides structured configuration and operations for:
-
-```text
-RCC
-GPIO
-EXTI
-USART
-TIM
-I2C
-SPI
-ADC
-DMA
-```
-
-Only lower layers should include these headers.
-
-## 8. CMSIS Device Layer
-
-CMSIS device headers provide STM32F103 peripheral register definitions,
-interrupt names, and device-level constants used by SPL and occasional BSP
-code.
-
-The project defines the medium-density device class with `STM32F10X_MD`.
-
-## 9. CMSIS Architecture Layer
-
-CMSIS Cortex-M3 support owns architecture-level operations such as:
-
-- `__NOP()`;
-- `__WFI()`;
-- `__disable_irq()`;
-- `__enable_irq()`;
-- PRIMASK access;
-- NVIC operations;
-- `SysTick_Config()`.
-
-These facilities belong in System/BSP/platform code rather than Application.
-
-## 10. Common
-
-Common code is hardware-independent.
-
-Example 04's byte ring buffer belongs here because it knows only storage,
-head/tail indices, and a producer/consumer contract.
-
-## 11. System as Composition Root
-
-System may include all public layer APIs because it wires modules together.
-
-Typical order:
-
-```text
-board_init()
-service_init()
-external_device_init()
-application_init()
-```
-
-System must not contain product behavior that belongs in Application.
-
-## 12. Initialization Order
-
-Initialize from physical dependencies upward:
-
-```text
-clock/pin/peripheral
-        |
-        v
-board resource
-        |
-        v
-external device/service
-        |
-        v
-application
-```
-
-Examples:
-
-- Time Service requires Board Timebase first.
-- SSD1306 initialization requires I2C bus and timebase first.
-- Application memory self-test requires Memory Service/W25Q64 first.
-
-## 13. Interrupt Ownership
-
-The lowest module that owns the interrupt source implements the strong handler.
-
-Examples:
-
-```text
-Board Timebase -> SysTick_Handler
-Board Button   -> EXTI0_IRQHandler
-Board UART     -> USART1_IRQHandler
-Board ADC/DMA  -> DMA1_Channel1_IRQHandler
-```
-
-An ISR must not call Application.
-
-## 14. Interrupt-to-Thread Handoff Patterns
-
-### Event Bit
-
-Useful for a simple edge:
-
-```text
-ISR: pending = true
-thread: take + clear
-```
-
-### Counter
-
-Useful when event count or diagnostic count matters.
-
-### Ring Buffer
-
-Useful for byte streams:
-
-```text
-RX ISR producer -> ring -> thread consumer
-thread producer -> ring -> TX ISR consumer
-```
-
-### Block-Ready
-
-Useful for DMA:
-
-```text
-DMA ISR -> stable completed block -> thread Service
-```
-
-## 15. Critical Sections
-
-Use short critical sections only when a multi-step shared-state operation must
-be atomic.
-
-Correct:
-
-```text
-save PRIMASK
-disable interrupts
-copy/read-clear shared state
-restore PRIMASK
-```
-
-Incorrect:
-
-```text
-disable interrupts
-perform I2C/SPI transaction
-format display
-restore interrupts
-```
-
-## 16. `volatile`
-
-Use `volatile` for state changed asynchronously by hardware/ISR context.
-
-`volatile` does not provide:
-
-- mutual exclusion;
-- atomic multi-step operations;
-- queue correctness;
-- memory ownership.
-
-Those require explicit design.
-
-## 17. Polling API Naming
-
-Prefer API names that describe immediate/non-blocking semantics:
-
-```text
-try_read
-try_write
-can_read
-can_write
-take_event
-process
-```
-
-For synchronous operations that may wait, document and enforce a timeout.
-
-## 18. Error Handling
-
-Convert low-level failures into bounded state:
-
-- `bool` failure;
-- status value;
-- error counter;
-- overflow counter.
-
-Examples include UART RX overflow, I2C transaction failure, W25Q64 timeout,
-DMA transfer error, and ADC calibration failure.
-
-## 19. Clock Ownership
-
-Application should use human-level units:
-
-```text
-milliseconds
-baud
-Hz
-permille
-millivolts
-```
-
-BSP/peripheral code converts those requests using the actual clock tree.
-
-Do not make Application depend on PCLK1/PCLK2 or timer prescalers.
-
-## 20. Board Active Level
-
-Logical Services hide electrical polarity.
-
-For the active-low PC13 LED:
-
-```text
-indication_service_set(true)
-```
-
-still means "turn the indicator on."
-
-The BSP decides that the physical GPIO level is LOW.
-
-## 21. External-Device Geometry
-
-External-device geometry belongs below Application.
-
-Examples:
-
-```text
-SSD1306: 128 x 64, 1024-byte framebuffer
-W25Q64: 8 MiB, 256-byte page, 4 KiB sector
-```
-
-Application should not build SPI/I2C command frames.
-
-## 22. Build-Time Configuration
-
-Use `config/` for project constants:
-
-- baud rate;
-- debounce interval;
-- buffer size;
-- timer frequency;
-- I2C/SPI speed;
-- device address;
-- timeout;
-- sample rate;
-- thresholds.
-
-Use compile-time checks for invalid relationships where practical.
-
-## 23. Dependency Checker Limitations
-
-The checker validates include direction.
-
-It cannot detect:
-
-- race conditions;
-- hidden coupling through globals;
-- long ISR latency;
-- incorrect clock configuration;
-- electrical wiring errors;
-- misuse of a correct SPL API.
-
-Architecture review and hardware testing are still required.
-
-## 24. Architectural Acceptance Checklist
-
--  Application has no BSP/SPL/CMSIS includes.
--  Services contain no raw peripheral calls.
--  BSP owns physical board mapping.
--  ECUAL owns external-device protocol.
--  SPL/CMSIS remain below upper layers.
--  ISR belongs to the lowest owner.
--  ISR work is bounded.
--  thread handoff is explicit.
--  shared state has clear ownership.
--  clock conversions occur below Application.
--  errors/overflows are observable.
--  `make check-layers` passes.
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)

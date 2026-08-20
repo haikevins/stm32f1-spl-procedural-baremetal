@@ -1,260 +1,146 @@
-# Porting Guide — Template
+# Porting Guide — Project Template
 
-## 1. Case A — New Project on the Same Blue Pill
+> **Scope:** A layered porting method for moving the template between boards, STM32F1 densities/parts, Cortex-M MCU families, or different CPU architectures without confusing board changes with Application changes.
 
-Copy the template and keep startup/linker/vendor layers unchanged.
+[← Root](../../README.md) · [← Template README](../README.md) · [Architecture](architecture.md) · [Adding a module](adding_a_module.md)
 
-Change:
+## Table of contents
 
-- board resources;
-- required SPL modules;
-- Services;
-- Application;
-- configuration.
+- [Porting by change scope](#porting-by-change-scope)
+- [Same STM32F103C8T6, new board](#same-stm32f103c8t6-new-board)
+- [Different STM32F1 part](#different-stm32f1-part)
+- [Different Cortex-M MCU family](#different-cortex-m-mcu-family)
+- [Different CPU architecture](#different-cpu-architecture)
+- [Clock, linker, and startup checklist](#clock-linker-and-startup-checklist)
+- [Peripheral and interrupt checklist](#peripheral-and-interrupt-checklist)
+- [Validation order](#validation-order)
+- [References](#references)
 
-## 2. Case B — Different Board, Same STM32F103C8T6
+## Porting by change scope
 
-Usually keep:
+Use the smallest replacement boundary that matches the physical change:
+
+| Change | Usually preserve | Rework/review first |
+|---|---|---|
+| new project, same Blue Pill | startup/linker/vendor/tooling | Application, Services, BSP resources, selected SPL modules |
+| different board, same C8 MCU | Application/Services/ECUAL/Common/startup/linker | BSP pins/electrical assumptions, config, OpenOCD/reset wiring |
+| different STM32F103 density | higher layers | linker memory, device density define, vector/startup compatibility |
+| different STM32F1 part | much of high-level policy | peripheral availability/remap, IRQ/DMA mapping, clock, linker/startup |
+| newer STM32 Cortex-M family | Application/Services/ECUAL concepts | vendor layer, BSP, startup, linker, clocks, debug target |
+| different CPU architecture | high-level conceptual separation | startup ABI, linker, critical sections, interrupt model, compiler/tooling |
+
+## Same STM32F103C8T6, new board
+
+Review every physical resource:
 
 ```text
-app/
-services/
-ecual/
-common/
-startup/
-linker/
-third_party/
+logical name -> GPIO port/pin -> mode/polarity -> peripheral AF/remap -> connector/electrical circuit
 ```
 
-Replace or review:
+Do not encode the new pin in Application. If an SSD1306 or W25Q64 remains the same IC, retain ECUAL protocol code and adapt its board-bus boundary.
 
-```text
-bsp/
-config/
-tools/openocd/
-```
+OpenOCD currently assumes ST-Link/SWD and `reset_config none`; if the new board exposes NRST, a hardware-reset configuration can be adopted after validation.
 
-## 3. Case C — STM32F103 with Different Memory Density
-
-Update:
-
-- linker flash/SRAM size;
-- device density build define;
-- startup/vector selection if required;
-- OpenOCD/device assumptions.
-
-Do not trust a C8 linker map for a larger/smaller density.
-
-## 4. Case D — Different STM32F1 Part
+## Different STM32F1 part
 
 Review:
 
-- peripheral availability;
-- GPIO alternate-function mapping;
-- IRQ list;
-- startup file;
-- density define;
-- linker memory;
-- SPL device support.
+- Flash and SRAM origin/length;
+- medium/high/value-line density preprocessor define;
+- vector table contents and exact IRQ names;
+- alternate-function/remap differences;
+- available timer/ADC/SPI/I2C/USART instances;
+- DMA channel mapping;
+- clock-tree limits;
+- SPL support for that part.
 
-Application/Services can often remain unchanged.
+Never use the C8 linker map merely because another package is also “STM32F103.”
 
-## 5. Case E — Different MCU Family but Still Cortex-M
+## Different Cortex-M MCU family
 
-The architecture can remain, but SPL is STM32F1-specific.
+The Application/Service/BSP/ECUAL decomposition can survive, but the checked-in STM32F1 SPL cannot. Replace the vendor/device layer and reimplement BSP against the new family API/register model. Also replace startup/device header, linker memory, clock initialization, and OpenOCD target.
 
-Replace:
+Review architecture-level assumptions such as NVIC priority bits, available DMA architecture, cache/coherency behavior, and whether compiler barriers/PRIMASK sections still satisfy the new concurrency model.
 
-- low-level vendor layer;
-- BSP implementation;
-- startup;
-- linker;
-- clock configuration;
-- OpenOCD target.
+## Different CPU architecture
 
-Keep higher layers where their APIs are truly hardware-independent.
+At that point even CMSIS/Cortex-M conventions are no longer portable. Port:
 
-## 6. Case F — Different CPU Architecture
+- reset/exception entry ABI;
+- vector/interrupt table model;
+- stack initialization;
+- linker section/memory conventions;
+- critical-section primitive;
+- memory-order/barrier semantics;
+- compiler CPU/ISA flags;
+- debug transport/server.
 
-Port:
+The conceptual layers can remain useful, but do not disguise architecture-specific code as “common.”
 
-- startup;
-- linker;
-- interrupt model;
-- critical-section implementation;
-- toolchain flags;
-- vendor/device layer.
-
-The conceptual Application/Service/BSP separation can still survive.
-
-## 7. BSP Selection Strategy
-
-Treat BSP as the place where one logical resource is mapped to one physical
-board resource.
-
-Examples:
-
-```text
-STATUS_LED -> PC13
-USER_BUTTON -> PA0
-MEMORY_SPI -> SPI1
-```
-
-Do not encode board pins in Application.
-
-## 8. Clock Porting
-
-Verify:
-
-- HSE frequency;
-- `HSE_VALUE`;
-- `SystemInit()`;
-- `SystemCoreClock`;
-- PCLK1/PCLK2;
-- APB timer x2 rule;
-- peripheral baud/timer calculations.
-
-## 9. GPIO Porting
-
-For each pin verify:
-
-- port clock;
-- pin number;
-- input/output/AF mode;
-- output speed;
-- pull-up/pull-down;
-- active polarity.
-
-## 10. Interrupt Porting
-
-Verify:
-
-- vector name;
-- IRQ number;
-- EXTI grouping;
-- NVIC priority;
-- pending flag clear sequence;
-- startup vector coverage.
-
-## 11. DMA Porting
-
-DMA mappings are device-specific.
-
-Verify:
-
-- peripheral-to-channel mapping;
-- transfer width;
-- circular/normal mode;
-- memory increment;
-- half/full/error interrupt flags.
-
-## 12. External-Device Driver Portability
-
-Keep ECUAL unchanged when:
-
-- the off-chip device is unchanged;
-- board bus semantics are unchanged.
-
-Replace only the board bus implementation.
-
-## 13. Linker Porting
-
-Update:
-
-- FLASH origin/length;
-- RAM origin/length;
-- stack top;
-- section placement.
-
-Then verify `.data`, `.bss`, stack, and code sizes.
-
-## 14. Startup Porting
-
-The startup file must match:
-
-- exception table;
-- MCU peripheral vectors;
-- reset sequence;
-- architecture instruction set.
-
-## 15. Toolchain Flags
-
-Review:
-
-```text
--mcpu
--mthumb
-device density defines
-HSE_VALUE
-vendor include paths
-```
-
-## 16. OpenOCD
-
-Change the target configuration if the MCU changes.
-
-Keep adapter speed conservative during first bring-up.
-
-## 17. Debug Reset Strategy
-
-The current project uses:
-
-```tcl
-reset_config none
-```
-
-because NRST may not be wired.
-
-If the new probe/board exposes NRST, you may adopt a hardware-reset strategy
-after validating it.
-
-## 18. Validation by Layer
-
-### Startup
-
-- reset reaches `main`;
-- `.data` initialized;
-- `.bss` zeroed.
+## Clock, linker, and startup checklist
 
 ### Clock
 
-- `SystemCoreClock` correct;
-- peripheral bus clocks correct.
+- oscillator frequency/source is correct;
+- vendor startup reaches the intended SYSCLK;
+- `SystemCoreClock` matches reality;
+- AHB/APB clocks are known;
+- APB timer doubling is handled where applicable;
+- peripheral maximum clocks remain legal.
 
-### GPIO
+### Linker
 
-- correct pin electrical mode;
-- output active level correct.
+- Flash/RAM origin and length match the exact part;
+- `.isr_vector` is retained at reset vector address;
+- `.data` has correct Flash load/RAM execution addresses;
+- `.bss` is zeroed range;
+- `_estack` is valid/aligned;
+- static data + stack headroom fit SRAM.
 
-### Peripheral
+### Startup
 
-- flags/interrupts/data movement correct.
+- reset entry matches ISA;
+- `.data/.bss` loops match linker symbols;
+- exact vector names match peripheral handlers;
+- `SystemInit()`/equivalent is called at the intended point.
 
-### Service/Application
+## Peripheral and interrupt checklist
 
-- logical behavior correct without lower-layer dependencies.
+For each peripheral verify as one unit:
 
-## 19. Automated Checks
+1. bus clock enable/reset;
+2. physical pins and AF mode;
+3. peripheral clock/prescaler;
+4. init fields and legal ranges;
+5. stale-flag clearing;
+6. IRQ/DMA request mapping and priority;
+7. handler acknowledgement sequence;
+8. shared-memory ownership/capacity;
+9. timeout/drop/retry policy;
+10. higher-layer API semantics.
 
-Run:
+## Validation order
 
-```bash
-make check-layers
-make clean
-make
-make size
+```mermaid
+flowchart TD
+    RESET["Reset/vector"] --> CRT[".data/.bss/stack"]
+    CRT --> CLOCK["Clock tree"]
+    CLOCK --> GPIO["GPIO safe states"]
+    GPIO --> PERIPH["Basic peripheral operation"]
+    PERIPH --> CONC["IRQ/DMA concurrency"]
+    CONC --> SERVICE["Service contract"]
+    SERVICE --> APP["Application behavior"]
+    APP --> LIMITS["Stress/error/power/reset limits"]
 ```
 
-## 20. Port Acceptance Checklist
+Keep bring-up evidence close to the lowest boundary. A wrong UART baud is more efficiently diagnosed from clocks/BRR and a logic analyzer than from Application code.
 
--  Linker matches memory.
--  Startup matches vector table.
--  Clock tree validated.
--  BSP pins validated.
--  SPL source list validated.
--  Interrupt names/priorities validated.
--  DMA mapping validated if used.
--  OpenOCD can connect.
--  Layer checker passes.
--  Clean build passes.
--  Hardware test reproduces expected behavior.
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
