@@ -1,395 +1,174 @@
-# 07-spi-memory — SPI1 + W25Q64 NOR Flash
+# SPI Memory — W25Q64 NOR Flash
 
-## 1. Learning Objectives
+> **Scope:** Example 7 of the repository progression — SPI1 mode 0, software chip select, JEDEC identification, WEL/BUSY state, sector erase/page program/readback self-test.
 
-This example demonstrates a synchronous external NOR flash driver.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- SPI1 mode 0;
-- software-controlled chip select;
-- SPI polling with bounded waits;
-- JEDEC ID read;
-- Status Register-1 BUSY/WEL bits;
-- Write Enable;
-- 4 KiB sector erase;
-- 256-byte page-program rules;
-- read-back verification;
-- destructive test boundaries;
-- separation of memory protocol from board SPI wiring.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Wiring
+## Purpose and expected behavior
+
+At every reset the demo initializes the flash, validates the JEDEC manufacturer/capacity identity, erases the last 4 KiB sector, programs a fixed 32-byte pattern at the sector start, reads it back, and compares byte-for-byte. Pass is indicated by a 500 ms LED heartbeat; failure leaves the LED steadily on and exposes debug globals describing the stage/IDs/mismatch.
+
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: SPI1 mode 0, software chip select, JEDEC identification, WEL/BUSY state, sector erase/page program/readback self-test.
+
+## Hardware and wiring
+
+SPI1 uses PA5 SCK, PA6 MISO, PA7 MOSI, and PA4 as software-controlled chip select. The target is a W25Q64-class 8 MiB 3.3 V NOR flash. PC13 provides visible pass/fail indication.
 
 ```text
-STM32F103C8T6       W25Q64
+STM32F103C8T6        W25Q64
 --------------------------------
-3.3V        ------  VCC
-GND         ------  GND
-PA4         ------  CS
-PA5         ------  CLK
-PA6         ------  D1 / DO / MISO
-PA7         ------  D0 / DI / MOSI
+3.3 V       ------- VCC
+GND         ------- GND
+PA4         ------> CS
+PA5/SPI1    ------> CLK
+PA6/SPI1    <------ DO / MISO
+PA7/SPI1    ------> DI / MOSI
 ```
 
-Use 3.3 V only.
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-## 3. Expected Behavior
+## Configuration
 
-At startup the firmware:
-
-1. waits for the memory to be ready;
-2. reads JEDEC ID;
-3. verifies Winbond manufacturer and 64-Mbit capacity code;
-4. erases the last 4 KiB sector;
-5. programs a 32-byte test pattern;
-6. reads it back;
-7. compares every byte.
-
-If the full self-test passes:
-
-```text
-PC13 toggles every 500 ms
-```
-
-If erase/program/read-back verification fails after successful memory
-initialization:
-
-```text
-PC13 stays ON
-```
-
-If JEDEC/device initialization itself fails, `system_init()` fails and the
-firmware enters `system_panic()`.
-
-## 4. W25Q64 Geometry in the Driver
-
-```text
-total size: 8 MiB = 8,388,608 bytes
-address range: 0x000000 .. 0x7FFFFF
-page size: 256 bytes
-sector size: 4096 bytes
-```
-
-The demo uses:
-
-```text
-last sector start = 0x007FF000
-```
-
-## 5. JEDEC ID
-
-Command:
-
-```text
-0x9F
-```
-
-Three bytes are read:
-
-```text
-manufacturer
-memory type
-capacity
-```
-
-The driver requires:
-
-```text
-manufacturer = 0xEF
-capacity     = 0x17
-```
-
-The memory-type byte is recorded but not restricted to one exact value so the
-driver remains useful across compatible W25Q64 revisions.
-
-A common observed result is:
-
-```text
-EF 40 17
-```
-
-## 6. SPI Configuration
-
-```text
-peripheral: SPI1
-mode: master
-direction: 2-line full duplex
-data size: 8 bit
-CPOL: 0
-CPHA: first edge
-first bit: MSB
-NSS: software
-```
-
-That is SPI mode 0.
-
-CS is controlled separately on PA4.
-
-## 7. SPI Clock Selection
-
-The configured maximum is:
-
-```c
-#define BOARD_MEMORY_SPI_MAX_HZ (5000000UL)
-```
-
-The BSP reads PCLK2 and selects the fastest SPL baud prescaler that does not
-exceed the requested maximum.
-
-With PCLK2 = 72 MHz:
-
-```text
-/16 -> 4.5 MHz
-```
-
-## 8. Chip Select
-
-A complete flash command transaction is wrapped by:
-
-```text
-CS LOW
-    |
-command/address/data clocks
-    |
-CS HIGH
-```
-
-CS stays low across multi-part operations such as:
-
-```text
-command header
-then receive payload
-```
-
-The BSP drives CS high during initialization so the flash remains deselected.
-
-## 9. SPI Transfer Primitive
-
-For each byte:
-
-```text
-wait TXE
-write byte
-wait RXNE
-read byte
-```
-
-If the caller wants receive-only behavior, the BSP sends dummy `0xFF` bytes.
-
-After the transfer it waits for BSY to clear before returning.
-
-All waits are bounded by the board timebase timeout.
-
-## 10. W25Q64 Command Set Used by the Demo
-
-| Command | Value |
+| Constant | Value |
 |---|---:|
-| Write Enable | `0x06` |
-| Read Status Register-1 | `0x05` |
-| Read Data | `0x03` |
-| Page Program | `0x02` |
-| 4 KiB Sector Erase | `0x20` |
-| JEDEC ID | `0x9F` |
+| Flash capacity model | 8 MiB |
+| Page | 256 bytes |
+| Sector | 4 KiB |
+| SPI mode | mode 0 |
+| BSP maximum SPI clock | 5 MHz |
+| default derived SPI clock | 4.5 MHz at 72 MHz PCLK2 (`/16`) |
+| per-byte/status wait timeout | 20 ms |
+| page-program ready timeout | 50 ms |
+| sector-erase ready timeout | 2000 ms |
+| destructive test sector | `0x007FF000` |
+| test payload | 32 bytes |
+| pass heartbeat | 500 ms |
 
-## 11. Status Register-1
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-### BUSY
-
-Bit 0 indicates an internal program/erase operation is still active.
-
-The driver polls until BUSY clears or a timeout expires.
-
-### WEL
-
-Bit 1 is Write Enable Latch.
-
-Before erase/program:
+## Source ownership
 
 ```text
-send 0x06
-    |
-read status
-    |
-WEL set?
+app/src/application.c
+  -> memory_service + indication_service + time_service
+services/src/memory_service.c
+  -> w25q64 ECUAL
+ecual/src/w25q64.c
+  -> board_memory_bus
+bsp/bluepill/src/board_memory_bus.c
+  -> SPI1 PA5/PA6/PA7 + software CS PA4
 ```
 
-If WEL is not set, the write operation is not started.
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
 
-## 12. Bounded Polling
+## Runtime flow
 
-Internal flash operations can take much longer than one SPI byte.
+```mermaid
+flowchart TD
+    ID["Read JEDEC ID with command 0x9F"] --> VALID{"Winbond manufacturer 0xEF and capacity 0x17?"}
+    VALID -- "no" --> FAIL["Record error; steady LED"]
+    VALID -- "yes" --> ERASE["WREN -> verify WEL -> 4 KiB erase 0x20"]
+    ERASE --> READY1["Poll BUSY with bounded timeout"]
+    READY1 --> PROGRAM["WREN -> page program 0x02, 32 bytes"]
+    PROGRAM --> READY2["Poll BUSY with 50 ms bound"]
+    READY2 --> READ["Read 0x03 into 32-byte buffer"]
+    READ --> CMP{"Byte-for-byte equal?"}
+    CMP -- "no" --> FAIL
+    CMP -- "yes" --> PASS["Pass; toggle heartbeat every 500 ms"]
+```
 
-Configured limits:
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### SPI clock selection
+
+SPI1 is on APB2. The BSP selects the first legal STM32 SPI prescaler whose resulting clock does not exceed 5 MHz. At the normal 72 MHz PCLK2, `/8` would be 9 MHz and is rejected; `/16` gives 4.5 MHz and is selected. This derives the bus rate from the actual peripheral clock instead of hard-coding one BR field.
+
+### Safe chip-select startup
+
+PA4 is driven HIGH before/while it becomes an output so the flash starts deselected. SPI uses CPOL low / first-edge capture (mode 0), 8-bit full duplex, and software NSS. Every received byte is clocked by transmitting a byte; reads use `0xFF` dummy data.
+
+### NOR state protocol
+
+The ECUAL driver models commands and state rather than exposing raw SPI calls upward:
 
 ```text
-SPI transaction timeout: 20 ms
-page program timeout: 50 ms
-sector erase timeout: 2000 ms
+0x06  Write Enable
+0x05  Read Status Register 1
+0x03  Read Data
+0x02  Page Program
+0x20  4 KiB Sector Erase
+0x9F  JEDEC ID
 ```
 
-The driver repeatedly reads Status Register-1 and compares elapsed milliseconds.
+Status bit 0 is BUSY; bit 1 is WEL. Program/erase operations wait until not busy, issue WREN, verify WEL, send the operation, then poll BUSY with an operation-specific bound. Page program rejects zero length, data beyond 256 bytes, address overflow, and crossing a page boundary. Sector erase aligns the supplied address down to a 4 KiB sector start.
 
-No infinite BUSY loop is used.
+### Transaction blocking versus unbounded blocking
 
-## 13. Page Program Rules
+The design is synchronous in thread mode: a sector erase can occupy the cooperative loop while BUSY remains asserted. The important safety distinction is that every wait is bounded. This is acceptable for a focused NOR demo but would need an asynchronous state machine or scheduler integration in latency-sensitive firmware.
 
-A Page Program:
+### Destructive-test boundary
 
-- requires Write Enable;
-- may program at most 256 bytes;
-- must not cross a 256-byte page boundary in this driver;
-- is followed by BUSY polling.
+`0x007FF000` is the last sector in the modeled 8 MiB device and is erased on every reset. It must not contain data that a user intends to preserve.
 
-The driver checks:
+## Concurrency and ownership
+
+SPI is polling/thread-mode only; SysTick continues to interrupt so timeouts and heartbeat time remain valid. There is no bus arbitration because this example has one SPI client.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-page_offset + length <= 256
+board timebase + LED + SPI1 → Services → W25Q64 init/JEDEC validation → destructive Application self-test
 ```
 
-before issuing the command.
+Application exports JEDEC IDs, stage pass flags, error count, first mismatch index, and first/last readback bytes as GDB-friendly globals. The demo validates manufacturer `0xEF` and capacity `0x17`; it intentionally does not require one specific memory-type byte.
 
-## 14. Sector Erase Rules
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-The driver aligns the supplied address down to a 4 KiB boundary:
-
-```text
-address -= address % 4096
-```
-
-Then:
-
-```text
-wait ready
-write enable
-send 0x20 + 24-bit address
-wait BUSY clear
-```
-
-## 15. Read Transaction
-
-```text
-CS LOW
-0x03
-A23..A16
-A15..A8
-A7..A0
-dummy clocks -> data bytes
-CS HIGH
-```
-
-The driver validates the requested address range before beginning.
-
-## 16. ECUAL Transport
-
-```text
-Application
-    |
-Memory Service
-    |
-W25Q64 ECUAL
-    |
-Board Memory Bus
-    |
-SPI1/GPIO/RCC SPL
-```
-
-The W25Q64 driver owns command/geometry semantics.
-
-The board bus owns SPI1 pins and chip select.
-
-## 17. Application Self-Test
-
-Pattern length:
-
-```text
-32 bytes
-```
-
-Test address:
-
-```text
-0x007FF000
-```
-
-Sequence:
-
-```text
-erase
-program
-read
-verify
-```
-
-The first mismatch index is recorded if verification fails.
-
-## 18. Debug Globals
-
-The Application deliberately exports bring-up state:
-
-```gdb
-p/x application_memory_manufacturer_id
-p/x application_memory_type_id
-p/x application_memory_capacity_id
-
-p/x application_memory_test_address
-p application_memory_erase_ok
-p application_memory_program_ok
-p application_memory_verify_ok
-p application_memory_test_passed
-p application_memory_error_count
-p/x application_memory_first_mismatch_index
-p/x application_memory_readback_first_byte
-p/x application_memory_readback_last_byte
-```
-
-## 19. LED Indication
-
-After a successful self-test:
-
-```text
-PC13 toggles every 500 ms
-```
-
-After a later self-test failure path handled by Application:
-
-```text
-PC13 steady ON
-```
-
-JEDEC initialization failure is earlier and enters panic.
-
-## 20. Interrupt Policy
-
-SPI interrupts are not used.
-
-SPI transactions are synchronous polling operations.
-
-SysTick provides timeout/heartbeat milliseconds.
-
-## 21. Architecture
-
-```text
-Application
-    |
-Memory Service
-    |
-W25Q64 ECUAL
-    |
-Board Memory Bus
-    |
-SPI1/GPIO SPL
-```
-
-Indication and Time Services are separate logical dependencies.
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -399,98 +178,37 @@ make debug-server
 make debug
 ```
 
-## 22. Test Procedure
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-**Warning:** the last 4 KiB sector is erased on every reset.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-1. Wire the W25Q64.
-2. Flash firmware.
-3. Inspect JEDEC globals.
-4. Verify manufacturer/capacity.
-5. Verify erase/program/verify booleans.
-6. Verify error count is zero.
-7. Confirm heartbeat LED.
-8. Optionally capture SPI with a logic analyzer.
+## Design decisions and limitations
 
-## 23. JEDEC Troubleshooting
+- The self-test is intentionally destructive and unsuitable for a sector containing persistent application data.
+- No wear leveling, filesystem, SFDP discovery, or power-fail transaction layer is implemented.
+- No >16 MiB/4-byte address support is needed for W25Q64.
+- Synchronous erase is simple but can block thread mode for a long interval.
 
-### `00 00 00`
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-Likely causes:
+## Porting boundary
 
-- MISO stuck low;
-- wrong D1/DO wiring;
-- no power;
-- no common ground.
+For another SPI flash, do not assume command set/status bits/page size/erase geometry or JEDEC capacity encoding are identical. If the device stays W25Q64 but the board changes, isolate changes to BSP pin/SPI clock/CS ownership where possible.
 
-### `FF FF FF`
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-Likely causes:
+## References
 
-- MISO floating/high;
-- CS never asserted;
-- device not selected;
-- wiring open.
+- [Winbond — W25Q64 product search/documentation](https://www.winbond.com/hq/search/?__locale=en&q=W25Q64JV)
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-### ID Is Correct but Program/Erase Fails
 
-Basic SPI wiring is mostly proven.
+---
 
-Focus on:
-
-- Write Enable;
-- WEL status;
-- BUSY polling;
-- erase address;
-- page boundary;
-- timeout.
-
-## 24. Logic Analyzer
-
-Expected JEDEC transaction:
-
-```text
-CS low
-9F
-FF -> EF
-FF -> type
-FF -> 17
-CS high
-```
-
-Expected command mode:
-
-```text
-CPOL = 0
-sample on first edge
-```
-
-Check CS remains low for the entire command/address/data phase.
-
-## 25. Wear/Endurance Note
-
-This demo erases the same sector at every reset.
-
-That is convenient for education but not a production data-management
-strategy.
-
-Do not reset continuously for no reason and do not store important data in the
-test sector.
-
-A real application should implement allocation, wear policy, or a filesystem as
-required.
-
-## 26. Extension Exercises
-
-1. Add multi-page programming.
-2. Add block/chip erase.
-3. Add device-capacity detection.
-4. Add a shared SPI bus abstraction.
-5. Add asynchronous state-machine-based erase/program.
-6. Build a simple key-value store.
-7. Add CRC to stored records.
-
-## 27. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

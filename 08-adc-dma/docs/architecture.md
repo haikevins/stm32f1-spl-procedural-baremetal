@@ -1,161 +1,140 @@
-# Architecture — 08-adc-dma
+# Architecture — ADC + DMA — Timer-Triggered Sample Pipeline
 
-## 1. Hardware Data Path
+> **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `08-adc-dma`.
 
-```text
-TIM3 update
-    |
-    v
-ADC1 channel 0
-    |
-    v
-ADC1->DR
-    |
-    v
-DMA1 Channel 1
-    |
-64-sample circular buffer
-```
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-CPU intervention is not required for each individual sample.
+## Table of contents
 
-## 2. Software Dependency Graph
+- [Architectural objective](#architectural-objective)
+- [Layer and source map](#layer-and-source-map)
+- [Composition and initialization](#composition-and-initialization)
+- [Runtime data flow](#runtime-data-flow)
+- [Concurrency contract](#concurrency-contract)
+- [Timing and memory reasoning](#timing-and-memory-reasoning)
+- [Failure and observability](#failure-and-observability)
+- [Extension boundaries](#extension-boundaries)
+- [References](#references)
 
-```text
-Application
-    |
-    +--> ADC Service
-    |       |
-    |       v
-    |   Board ADC/DMA
-    |       |
-    |       v
-    |   ADC/DMA/TIM/GPIO SPL
-    |
-    +--> Indication Service
-            |
-            v
-         Board LED
-```
+## Architectural objective
 
-## 3. Ownership Table
+This example is not organized around “one source file per peripheral demo.” It keeps the repository's core rule: **Application expresses policy; lower layers own mechanisms and physical resources**. The concrete subject is TIM3 TRGO at 1 kHz, ADC1 channel 0, DMA1 Channel 1 circular buffer, half/full ISR block handoff, measurement processing and LED hysteresis.
 
-| Concern | Owner |
-|---|---|
-| sample timing | TIM3 / Board ADC-DMA |
-| ADC conversion | ADC1 / Board ADC-DMA |
-| DMA circular buffer | Board ADC-DMA |
-| DMA IRQ | Board ADC-DMA |
-| stable completed block | Board ADC-DMA |
-| average/min/max/mV | ADC Service |
-| threshold hysteresis | Application |
-| PC13 polarity | Board LED |
+The design should remain understandable in both directions:
 
-## 4. ISR Placement in the Current Code
+- reading downward explains how a logical request reaches STM32 hardware;
+- reading upward explains how low-level hardware state becomes a bounded, meaningful event/capability for Application.
 
-`DMA1_Channel1_IRQHandler()` lives in the BSP source that owns ADC/DMA.
-
-This matches the repository rule.
-
-The ISR does not call the ADC Service.
-
-## 5. Concurrency Zones
-
-Three memory zones exist:
-
-1. DMA-owned circular buffer;
-2. BSP stable completed block;
-3. Service-owned processing buffer.
-
-The block-ready flag bridges ISR and thread mode.
-
-A short PRIMASK critical section protects take-and-clear/copy behavior.
-
-## 6. Overrun Semantics
-
-If a new DMA half completes while the previous stable block is still pending:
+## Layer and source map
 
 ```text
-s_overrun_count++
-new completed half replaces previous published block
+app/src/application.c
+  -> adc_service + indication_service
+services/src/adc_service.c
+  -> board_adc_dma block API
+bsp/bluepill/src/board_adc_dma.c
+  -> TIM3 TRGO + ADC1 + DMA1 CH1 ISR
 ```
 
-The design prioritizes the newest block over preserving an unbounded backlog.
+```mermaid
+flowchart TD
+    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
+    SYS --> SVC["services: logical capability"]
+    SYS --> BSP["bsp/bluepill: resource ownership"]
+    APP --> SVC
+    SVC --> BSP
+    SVC --> ECUAL["ecual: off-chip protocol when used"]
+    ECUAL --> BSP
+    BSP --> SPL["SPL/CMSIS"]
+    SPL --> HW["STM32 / external hardware"]
+```
 
-## 7. Sampling Determinism
+The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
-Sample timing comes from TIM3 hardware, not super-loop execution.
+## Composition and initialization
 
-Therefore:
+The reset path is common to the repository. After `.data/.bss` initialization and `SystemInit()`, `main()` delegates composition to `system_init()`.
+
+For this example the important dependency order is:
 
 ```text
-thread jitter != sample-time jitter
+board LED + TIM3/ADC1/DMA1 pipeline → ADC/Indication Services → Application; timer starts hardware acquisition after configuration
 ```
 
-as long as the hardware pipeline continues running.
+The order matters because a module should never receive events or invoke a dependency before its state is valid. Peripheral flags are cleared and NVIC lines are configured only after associated storage/state is ready.
 
-Long interrupt masking can still affect DMA service latency and cause overrun.
+## Runtime data flow
 
-## 8. Service Decoupling
-
-ADC Service receives a block of raw samples and converts it into:
-
-```text
-average_raw
-minimum_raw
-maximum_raw
-millivolts
-sequence
+```mermaid
+flowchart LR
+    TIM3["TIM3 TRGO: 1 kHz"] --> ADC["ADC1 channel 0 conversion"]
+    ADC --> DMA["DMA1 CH1 circular 64-sample buffer"]
+    DMA --> HT["HT IRQ: copy samples 0..31"]
+    DMA --> TC["TC IRQ: copy samples 32..63"]
+    HT --> STAGE["One 32-sample staging block"]
+    TC --> STAGE
+    STAGE --> SVC["Thread: min/max/average/mV"]
+    SVC --> APP["Application diagnostics + LED hysteresis"]
 ```
 
-Application does not know DMA buffer geometry.
+Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
-## 9. Error Propagation
+## Concurrency contract
 
-DMA transfer errors are counted in BSP and exposed through Service to
-Application debug globals.
+TIM3 and ADC run autonomously; DMA is the producer; DMA ISR publishes completed blocks; thread mode consumes/processes them. The design explicitly separates hardware sample timing from software processing latency.
 
-Calibration/configuration failure causes initialization failure and panic.
+### Key invariants
 
-## 10. Memory Use
+- TIM3, not software, defines sample instants.
+- DMA owns the 64-sample circular acquisition buffer.
+- ISR copies only a completed half; it never processes samples numerically.
+- One staging block is either pending or free; a new completion overwrites old pending data and increments overrun.
+- Thread mode copies the staging block under a short PRIMASK critical section before computation.
+- Application hysteresis thresholds satisfy OFF < ON at compile time.
 
-Major static sample storage:
+### Rate reasoning
 
-```text
-DMA buffer:       64 * 2 = 128 bytes
-completed block:  32 * 2 = 64 bytes
-Service buffer:   32 * 2 = 64 bytes
-```
+One 32-sample half is produced every 32 ms. The system receives alternating HT/TC events at 31.25 blocks/s total. The thread path therefore has a clear service deadline: normally consume within one block period if no overrun is desired.
 
-This intentionally trades RAM for simple ownership and stable processing.
+The repository uses `volatile` for state that can change asynchronously, but `volatile` alone is not treated as a lock or a complete synchronization primitive. Where a compound take/clear or block copy must be atomic with respect to an ISR, the code uses a short PRIMASK critical section. Where SPSC ring publication depends on compiler ordering, it uses an explicit compiler barrier.
 
-## 11. Extension Options
+## Timing and memory reasoning
 
-### Multi-Channel Scan
+The project has no heap. Buffers, device state, counters, and Application state are statically or automatically allocated and are therefore visible in the link map.
 
-Interleave channels in the DMA stream and let Service deinterleave them.
+Clock-dependent behavior is derived from CMSIS/SPL clock state wherever the example needs exact peripheral timing. The normal board configuration is 72 MHz HCLK, 72 MHz PCLK2, 36 MHz PCLK1, with APB1 timers receiving 72 MHz because their bus prescaler is not 1.
 
-### No-Copy Ping-Pong
+The most important timing-specific behavior for this example is described in its [README](../README.md); source constants under `config/` are authoritative.
 
-Process DMA halves directly with strict ownership and timing guarantees.
+## Failure and observability
 
-This reduces copies but increases concurrency complexity.
+DMA transfer-error interrupts increment an error counter. Publication overwrite increments an overrun counter. ADC calibration is bounded by iteration count during init. The demo does not automatically restart a failed DMA/ADC pipeline after a runtime error.
 
-### Multiple-Block Queue
+Initialization failure propagates toward `system_init()` instead of being silently ignored. Runtime diagnostics are deliberately low-overhead: counters, state flags, and GDB-visible globals are preferred to adding a logging subsystem that would change the example's peripheral/concurrency profile.
 
-Queue block descriptors/data if every block must be retained.
+## Extension boundaries
 
-This increases RAM and overflow-policy complexity.
+When extending this example:
 
-## 12. Boundary Rule
+1. keep board pin/peripheral mapping in BSP/configuration;
+2. keep external-device command semantics in ECUAL when an off-chip device is involved;
+3. expose a Service capability rather than an SPL type to Application;
+4. keep ISR work bounded and define the publication/ownership rule before writing the handler;
+5. update `config/modules.mk` only with the SPL sources actually required;
+6. run `make check-layers` before accepting the change;
+7. document any new buffer capacity, timeout, drop policy, interrupt priority, or destructive operation.
 
-Keep this boundary:
+## References
 
-```text
-hardware sample movement -> BSP
-sample interpretation -> Service
-product threshold policy -> Application
-```
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-Do not move ADC/DMA register/SPL details upward just to reduce the number of
-functions.
+
+---
+
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

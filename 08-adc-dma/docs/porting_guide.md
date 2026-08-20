@@ -1,158 +1,123 @@
-# Porting Guide — 08-adc-dma
+# Porting Guide — ADC + DMA — Timer-Triggered Sample Pipeline
 
-## 1. Changing ADC Input Pin/Channel
+> **Scope:** What must be re-validated when `08-adc-dma` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-Update both:
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-- GPIO analog pin;
-- ADC channel number.
+## Table of contents
 
-These must match the STM32F103 pinout.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-Keep Application unchanged.
+## Porting principle
 
-## 2. Changing Sample Rate
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-Update:
+For this example, the stable logical behavior is: TIM3 TRGO at 1 kHz, ADC1 channel 0, DMA1 Channel 1 circular buffer, half/full ISR block handoff, measurement processing and LED hysteresis.
 
-```c
-BOARD_ADC_SAMPLE_RATE_HZ
-```
+## Change matrix
 
-Verify:
+| Change | Primary review |
+|---|---|
+| analog pin/channel | GPIO analog mode + ADC sequence channel |
+| sample rate | TIM3 input clock, PSC/ARR/TRGO, ADC conversion-time margin |
+| source impedance | ADC sample time and analog front-end settling |
+| DMA mapping | channel/request mapping, widths, HT/TC/TE flags |
+| reference | actual VDDA/reference model and conversion formula |
+| buffering | overwrite semantics, block size, ISR copy/zero-copy ownership |
 
-```text
-timer_tick % sample_rate == 0
-```
+## Same MCU, different board
 
-and confirm ADC conversion time is short enough for the requested rate.
+ADC and DMA mappings are device-specific. Re-verify channel-to-pin mapping, ADC clock limit, sample time/source impedance, timer TRGO selection, DMA channel mapping, transfer width, IRQ flags, VDDA/reference, and trigger rate on every MCU/board change.
 
-## 3. Changing Trigger Timer
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Verify the selected timer can produce an ADC external trigger supported by
-STM32F103 ADC1.
+## Clock and timing re-validation
 
-Update:
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-- RCC clock;
-- timer instance;
-- TRGO selection;
-- ADC external trigger selection.
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-## 4. Changing DMA Buffer Size
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-The current design requires:
+## Interrupt and concurrency re-validation
 
-```text
-buffer >= 2
-buffer even
-buffer <= 65535
-```
-
-Block size is half the circular buffer.
-
-Recalculate RAM usage and block period.
-
-## 5. Changing DMA Channel
-
-DMA peripheral mapping is fixed by the MCU.
-
-Do not select a channel arbitrarily.
-
-Verify the reference mapping for the new ADC/peripheral.
-
-## 6. Changing the ADC Clock Limit
-
-The current SPL code explicitly selects:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-PCLK2 / 6
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-Review the target datasheet before changing the divider.
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-A different MCU/family may have a different ADC clock specification.
+TIM3 and ADC run autonomously; DMA is the producer; DMA ISR publishes completed blocks; thread mode consumes/processes them. The design explicitly separates hardware sample timing from software processing latency.
 
-## 7. Changing Reference Voltage
+## Moving across STM32F1 or MCU families
 
-Update:
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
 
-```c
-BOARD_ADC_REFERENCE_MV
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
+
+## Validation sequence
+
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
 ```
 
-only if the assumption is truly valid.
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
 
-For accurate measurement, measure VDDA or use an internal reference-based
-calibration strategy.
+## Failure signatures
 
-## 8. Multi-Channel ADC
+Useful porting clues:
 
-Enable scan mode and configure multiple ranks.
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
 
-Then define DMA data layout clearly:
+## References
 
-```text
-CH0, CH1, CH0, CH1, ...
-```
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-Service should own channel extraction/aggregation.
 
-## 9. Changing IRQ Priority
+---
 
-Review all interrupts in the final product.
-
-The DMA ISR must run often enough to publish blocks before data ownership is
-lost, but it should still remain short.
-
-## 10. Refactoring ISR Ownership
-
-If a reusable DMA abstraction is introduced, the strong DMA handler may move to
-that lower layer.
-
-Preserve the rule:
-
-```text
-ISR lives with the lowest owner of DMA1 Channel 1
-```
-
-Do not move the handler upward into Service/Application.
-
-## 11. Validation with Oscilloscope/Debug Pin
-
-For precise sample-rate validation, toggle a spare debug pin at block publish or
-use timer output where possible.
-
-Measure the expected block cadence:
-
-```text
-32 ms per published block at 1 kHz sampling
-```
-
-## 12. Validation Checklist
-
--  PA0/channel mapping correct;
--  ADC clock within limit;
--  calibration completes;
--  TIM3 frequency correct;
--  ADC conversions triggered externally;
--  DMA1 CH1 transfers;
--  HT/TC alternate;
--  sequence increases;
--  errors zero;
--  overruns zero at normal load;
--  voltage trend matches input;
--  hysteresis works.
-
-## 13. Common Pitfalls
-
-- using a GPIO digital mode instead of analog;
-- wrong ADC channel for the pin;
-- ADC clock too fast;
-- enabling continuous mode accidentally;
-- wrong external trigger;
-- wrong DMA channel;
-- forgetting circular mode;
-- doing statistics in the ISR;
-- ignoring block overrun;
-- assuming 3.300 V reference is exact.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

@@ -1,266 +1,171 @@
-# 02-gpio-input-interrupt — GPIO Input + EXTI + Debounce Outside the ISR
+# GPIO Input Interrupt — EXTI + Debounce
 
-## 1. Learning Objectives
+> **Scope:** Example 2 of the repository progression — active-low button, AFIO/EXTI mapping, minimal ISR publication, deferred 30 ms debounce.
 
-This example adds an interrupt-driven button without moving product behavior
-into the ISR.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- PA0 input with internal pull-up;
-- AFIO EXTI routing;
-- EXTI0 falling-edge interrupt;
-- NVIC priority;
-- ISR-to-thread event handoff;
-- debounce using timestamps;
-- atomic take-and-clear of a shared event flag;
-- logical LED control through a Service.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Wiring
+## Purpose and expected behavior
 
-Use a normally-open push button:
+A falling edge on PA0 raises EXTI0. The ISR does not debounce and does not toggle the LED; it records one pending edge and clears the EXTI flag. Thread mode consumes that edge atomically, starts/restarts a 30 ms window, and later reads the pin. Only a still-low input becomes a debounced pressed event. Application consumes that logical event and toggles the status indication.
 
-```text
-PA0 ---- push button ---- GND
-```
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: active-low button, AFIO/EXTI mapping, minimal ISR publication, deferred 30 ms debounce.
 
-PA0 uses the STM32 internal pull-up.
+## Hardware and wiring
 
-Therefore:
-
-```text
-released -> HIGH
-pressed  -> LOW
-```
-
-A press generates a falling edge on EXTI line 0.
-
-The onboard PC13 LED is the output indicator.
-
-## 3. Behavior
-
-Each valid debounced button press toggles the PC13 LED exactly once.
-
-Expected behavior:
-
-- quick contact bounce should not cause multiple toggles;
-- holding the button should not repeatedly toggle;
-- a later release-and-press produces the next event.
-
-## 4. Configuration
-
-Board mapping:
+User button on PA0 wired to GND. PA0 is configured as input pull-up, so release reads HIGH and press reads LOW. The onboard PC13 LED remains the logical indication output.
 
 ```text
-Button: PA0
-EXTI line: 0
-IRQ: EXTI0_IRQn
-IRQ priority: 2
-Polarity: active-low
+3.3 V
+  |
+  +-- internal pull-up
+  |
+ PA0 -------- push button -------- GND
+
+PC13 -------- onboard active-low LED
 ```
 
-Timebase:
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-```c
-#define BOARD_TIMEBASE_HZ (1000UL)
-```
+## Configuration
 
-Debounce:
+| Constant | Value | Meaning |
+|---|---:|---|
+| `BOARD_TIMEBASE_HZ` | 1000 Hz | millisecond timebase |
+| `BUTTON_DEBOUNCE_TIME_MS` | 30 ms | stable-low qualification time |
+| EXTI line | EXTI0 | PA0 interrupt line |
+| EXTI trigger | falling edge | HIGH→LOW candidate press |
+| NVIC preemption priority | 2 | EXTI0 priority configured by BSP |
 
-```c
-#define BUTTON_DEBOUNCE_TIME_MS (30UL)
-```
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-## 5. Initialization Flow
+## Source ownership
 
 ```text
-board_init()
-    |
-    +--> board_led_init()
-    +--> board_timebase_init()
-    +--> board_button_init()
-            |
-            +--> enable GPIOA + AFIO clocks
-            +--> configure PA0 input pull-up
-            +--> map GPIOA pin 0 to EXTI0
-            +--> configure falling edge
-            +--> clear pending EXTI
-            +--> set NVIC priority
-            +--> enable EXTI0 IRQ
-
-system_init()
-    |
-    +--> time_service_init()
-    +--> indication_service_init()
-    +--> button_service_init()
-    +--> application_init()
+app/src/application.c
+  -> button_service + indication_service
+services/src/button_service.c
+  -> board_button + time_service
+bsp/bluepill/src/board_button.c
+  -> GPIOA + AFIO + EXTI0 + NVIC
+bsp/bluepill/src/board_timebase.c
+  -> SysTick
 ```
 
-`button_service_init()` discards a stale edge that may have occurred during
-board setup.
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
 
-## 6. GPIO Input Pull-Up with SPL
+## Runtime flow
 
-The BSP configures PA0 as:
+```mermaid
+sequenceDiagram
+    participant BTN as PA0 button
+    participant ISR as EXTI0_IRQHandler
+    participant FLAG as Pending-edge flag
+    participant SVC as button_service_process
+    participant APP as application_process
+
+    BTN->>ISR: falling edge
+    ISR->>FLAG: pending = true
+    ISR->>ISR: clear EXTI0 pending bit
+    SVC->>FLAG: atomic take-and-clear
+    SVC->>SVC: start/restart 30 ms debounce
+    SVC->>BTN: sample pin after window
+    alt still LOW
+        SVC->>APP: publish pressed event
+        APP->>APP: toggle indication
+    else HIGH again
+        SVC->>SVC: reject bounce/transient
+    end
+```
+
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### GPIO and EXTI mapping
+
+PA0 is not automatically connected to EXTI0 merely because the line numbers match. BSP enables AFIO and selects GPIOA as the EXTI0 source, configures falling-edge EXTI, clears stale pending state, then enables the NVIC line.
+
+### ISR-to-thread handoff
+
+`board_button_take_press_edge()` masks interrupts using PRIMASK, copies/clears the `volatile bool` pending flag, then restores the caller's previous interrupt-enable state. The critical section protects the read-modify-clear operation against a concurrent EXTI edge. Restoring the original PRIMASK instead of blindly enabling interrupts makes the helper safe when called from an already-masked context.
+
+### Event coalescing
+
+The ISR publishes a boolean, not a counter. Multiple edges that occur before thread mode takes the flag collapse into one candidate event. For a mechanical button this is intentional: the goal is a qualified logical press, not edge metrology.
+
+### Debounce state model
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Qualifying: raw falling edge consumed
+    Qualifying --> Qualifying: another raw edge restarts window
+    Qualifying --> PressedEvent: 30 ms elapsed and PA0 still LOW
+    Qualifying --> Idle: 30 ms elapsed and PA0 is HIGH
+    PressedEvent --> Idle: logical event consumed
+```
+
+### Deferred debounce
+
+Each consumed candidate edge resets the debounce start timestamp. After 30 ms, the Service samples the real pin and publishes a separate logical pressed event only if it remains active. This keeps time-dependent policy outside EXTI context.
+
+## Concurrency and ownership
+
+SysTick updates time; EXTI0 publishes the raw candidate. PRIMASK protects take-and-clear. Debounce state and logical pressed-event state are owned by thread mode.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-GPIO_Mode_IPU
+board LED/button/timebase → Time Service → Indication Service → Button Service → Application
 ```
 
-The external switch connects the pin to GND when pressed.
+There is no runtime retry mechanism because GPIO/EXTI have no transactional device fault here. A wrong pin source, polarity, pending-bit sequence, or timebase manifests as missing/repeated press events and should be diagnosed at the BSP boundary.
 
-No external pull-up resistor is required for this example.
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-The logical function:
-
-```c
-bool board_button_is_pressed(void);
-```
-
-converts the physical level into a boolean pressed state.
-
-## 7. AFIO + EXTI Setup
-
-The BSP:
-
-1. enables AFIO;
-2. calls `GPIO_EXTILineConfig()` to route GPIOA pin 0 to EXTI0;
-3. configures `EXTI_Mode_Interrupt`;
-4. selects `EXTI_Trigger_Falling`;
-5. clears stale pending state;
-6. enables the NVIC line.
-
-This routing step is required because EXTI line number alone does not encode the
-GPIO port.
-
-## 8. ISR Ownership
-
-`EXTI0_IRQHandler()` belongs to the Board Button module.
-
-It performs only:
-
-```text
-check EXTI0 pending
-    |
-set s_press_edge_pending = true
-    |
-clear EXTI0 pending bit
-    |
-return
-```
-
-It does not debounce and does not call Application.
-
-## 9. Event Handoff from ISR to Thread Mode
-
-The ISR writes:
-
-```c
-static volatile bool s_press_edge_pending;
-```
-
-Thread mode consumes it through:
-
-```c
-bool board_button_take_press_edge(void);
-```
-
-The read-and-clear sequence is protected with PRIMASK:
-
-```text
-save interrupt state
-disable IRQ
-read flag
-clear flag
-restore previous interrupt state
-```
-
-This prevents losing an edge between reading and clearing the shared flag.
-
-## 10. Debounce Algorithm
-
-The Button Service owns debounce policy.
-
-When an edge is received:
-
-```text
-record current time
-set debounce active
-```
-
-Every later Service call checks elapsed time.
-
-Before 30 ms:
-
-```text
-return immediately
-```
-
-After 30 ms:
-
-```text
-sample physical button
-    |
-still pressed?
-    |
-    +--> yes -> publish one pressed event
-    +--> no  -> ignore as bounce/noise
-```
-
-A new falling edge restarts the debounce window.
-
-## 11. Application
-
-Application logic is intentionally tiny:
-
-```text
-button_service_process()
-    |
-take debounced pressed event?
-    |
-    +--> yes -> toggle INDICATION_STATUS
-```
-
-Application does not know about PA0, EXTI0, active-low input, or debounce
-timing.
-
-## 12. Architecture
-
-```text
-Application
-    |
-    +--> Button Service ------> Board Button -----> EXTI/GPIO SPL
-    |
-    +--> Indication Service --> Board LED --------> GPIO SPL
-    |
-    +--> Time Service --------> Board Timebase ----> SysTick
-```
-
-## 13. Event Service
-
-This example does not require a generic queue.
-
-The Button Service exposes a one-event pending state because the product
-requirement is simply "one debounced press event."
-
-If multiple events must be retained, replace the boolean event with a counter or
-queue rather than adding work to the ISR.
-
-## 14. Idle Behavior
-
-The concrete example uses `__NOP()` in `system_idle()`.
-
-The CPU continuously executes the super-loop and immediately processes a button
-edge captured by the ISR.
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -270,61 +175,35 @@ make debug-server
 make debug
 ```
 
-## 15. Step-by-Step Test
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-1. Power the board.
-2. Confirm PC13 is initially OFF.
-3. Press PA0 button once.
-4. Confirm PC13 toggles once.
-5. Hold the button; LED should not repeatedly toggle.
-6. Release.
-7. Press again; LED toggles once again.
-8. Set a breakpoint at `EXTI0_IRQHandler()` and verify one or more raw bounce
-   edges may occur while only one debounced Application event is produced.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-## 16. Troubleshooting
+## Design decisions and limitations
 
-### Press Has No Effect
+- Boolean edge publication deliberately coalesces bounce bursts.
+- Polling the pin after 30 ms gives one-shot qualification, not a full press/release state machine.
+- The input relies on the MCU internal pull-up; external EMC requirements may demand stronger biasing/filtering.
 
-Check:
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-- button really connects PA0 to GND;
-- PA0 is HIGH when released;
-- EXTI0 handler is reached;
-- pending bit is cleared;
-- Button Service is being processed.
+## Porting boundary
 
-### LED Toggles Multiple Times per Press
+Porting requires reviewing GPIO electrical mode, active polarity, AFIO EXTI source, EXTI line/group IRQ name, NVIC priority, and the debounce interval. Application should still consume only a logical pressed event.
 
-Check:
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-- debounce interval is 30 ms;
-- the Service, not the ISR, owns debounce;
-- there is no extra Application toggle path;
-- switch wiring is not floating.
+## References
 
-### EXTI ISR Hits but LED Does Not Change
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-Then the low-level edge path works.
 
-Inspect:
+---
 
-- `s_press_edge_pending`;
-- Button Service debounce state;
-- physical button state after 30 ms;
-- pending debounced event;
-- Indication Service call.
-
-## 17. Extension Exercises
-
-1. Add a released event.
-2. Add long-press detection.
-3. Add double-click detection.
-4. Replace the boolean ISR event with a counter.
-5. Move the button to another EXTI line.
-6. Add a second button sharing an EXTI group handler.
-
-## 18. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

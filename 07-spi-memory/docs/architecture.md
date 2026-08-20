@@ -1,184 +1,145 @@
-# Architecture — 07-spi-memory
+# Architecture — SPI Memory — W25Q64 NOR Flash
 
-## 1. Dependency Graph
+> **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `07-spi-memory`.
 
-```text
-Application
-    |
-Memory Service
-    |
-W25Q64 ECUAL
-    |
-Board Memory Bus
-    |
-SPI1/GPIO/RCC SPL
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-Application
-    |
-Indication Service -> Board LED
-Application
-    |
-Time Service -> Board Timebase
-```
+## Table of contents
 
-## 2. External-Device Driver Composition
+- [Architectural objective](#architectural-objective)
+- [Layer and source map](#layer-and-source-map)
+- [Composition and initialization](#composition-and-initialization)
+- [Runtime data flow](#runtime-data-flow)
+- [Concurrency contract](#concurrency-contract)
+- [Timing and memory reasoning](#timing-and-memory-reasoning)
+- [Failure and observability](#failure-and-observability)
+- [Extension boundaries](#extension-boundaries)
+- [References](#references)
 
-Three concerns are deliberately separate:
+## Architectural objective
 
-```text
-Application policy
-W25Q64 protocol
-STM32 SPI wiring
-```
+This example is not organized around “one source file per peripheral demo.” It keeps the repository's core rule: **Application expresses policy; lower layers own mechanisms and physical resources**. The concrete subject is SPI1 mode 0, software chip select, JEDEC identification, WEL/BUSY state, sector erase/page program/readback self-test.
 
-The Memory Service is the Application-facing API.
+The design should remain understandable in both directions:
 
-The ECUAL driver owns W25Q64 semantics.
+- reading downward explains how a logical request reaches STM32 hardware;
+- reading upward explains how low-level hardware state becomes a bounded, meaningful event/capability for Application.
 
-The BSP owns SPI1/CS.
-
-## 3. Ownership Table
-
-| Concern | Owner |
-|---|---|
-| destructive test policy | Application |
-| logical memory operations | Memory Service |
-| JEDEC/status/erase/program/read | W25Q64 ECUAL |
-| PA4..PA7/SPI1 | Board Memory Bus |
-| SPI polling flags | Board Memory Bus |
-| LED result | Indication Service/BSP |
-| timeout clock | Time Service/Board Timebase |
-
-## 4. Synchronous Transaction Model
-
-Each ECUAL operation returns only after the required SPI transaction and,
-where applicable, internal flash BUSY polling are complete.
-
-That makes the API simple but means erase/program can occupy thread mode for a
-bounded interval.
-
-## 5. Poll Limits vs Timeouts
-
-This SPL implementation uses millisecond timeouts driven by the board timebase:
+## Layer and source map
 
 ```text
-SPI transaction: 20 ms
-page program: 50 ms
-sector erase: 2000 ms
+app/src/application.c
+  -> memory_service + indication_service + time_service
+services/src/memory_service.c
+  -> w25q64 ECUAL
+ecual/src/w25q64.c
+  -> board_memory_bus
+bsp/bluepill/src/board_memory_bus.c
+  -> SPI1 PA5/PA6/PA7 + software CS PA4
 ```
 
-These are wall-clock style timeouts, not loop-count limits.
+```mermaid
+flowchart TD
+    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
+    SYS --> SVC["services: logical capability"]
+    SYS --> BSP["bsp/bluepill: resource ownership"]
+    APP --> SVC
+    SVC --> BSP
+    SVC --> ECUAL["ecual: off-chip protocol when used"]
+    ECUAL --> BSP
+    BSP --> SPL["SPL/CMSIS"]
+    SPL --> HW["STM32 / external hardware"]
+```
 
-The timebase must therefore be functional before memory operations begin.
+The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
-## 6. Hardware Transaction Boundary
+## Composition and initialization
 
-The board bus owns:
+The reset path is common to the repository. After `.data/.bss` initialization and `SystemInit()`, `main()` delegates composition to `system_init()`.
+
+For this example the important dependency order is:
 
 ```text
-CS assertion
-SPI byte transfer
-CS deassertion
+board timebase + LED + SPI1 → Services → W25Q64 init/JEDEC validation → destructive Application self-test
 ```
 
-The ECUAL decides which bytes form one device command.
+The order matters because a module should never receive events or invoke a dependency before its state is valid. Peripheral flags are cleared and NVIC lines are configured only after associated storage/state is ready.
 
-This prevents protocol code from manipulating GPIO directly.
+## Runtime data flow
 
-## 7. Read/Write Semantics
-
-Read:
-
-```text
-no state change
-range validated
+```mermaid
+flowchart TD
+    ID["Read JEDEC ID with command 0x9F"] --> VALID{"Winbond manufacturer 0xEF and capacity 0x17?"}
+    VALID -- "no" --> FAIL["Record error; steady LED"]
+    VALID -- "yes" --> ERASE["WREN -> verify WEL -> 4 KiB erase 0x20"]
+    ERASE --> READY1["Poll BUSY with bounded timeout"]
+    READY1 --> PROGRAM["WREN -> page program 0x02, 32 bytes"]
+    PROGRAM --> READY2["Poll BUSY with 50 ms bound"]
+    READY2 --> READ["Read 0x03 into 32-byte buffer"]
+    READ --> CMP{"Byte-for-byte equal?"}
+    CMP -- "no" --> FAIL
+    CMP -- "yes" --> PASS["Pass; toggle heartbeat every 500 ms"]
 ```
 
-Program:
+Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
-```text
-1 -> 0 bit programming
-Write Enable required
-page boundary enforced
-BUSY polled
-```
+## Concurrency contract
 
-Erase:
+SPI is polling/thread-mode only; SysTick continues to interrupt so timeouts and heartbeat time remain valid. There is no bus arbitration because this example has one SPI client.
 
-```text
-4 KiB aligned sector
-Write Enable required
-BUSY polled
-```
+### Key invariants
 
-## 8. Error Propagation
+- CS is high when idle and one ECUAL command owns the complete CS-low transaction.
+- Program/erase require WREN and verified WEL before the modifying command.
+- Page program never crosses a 256-byte page boundary.
+- Sector erase operates on a 4 KiB-aligned sector.
+- Every busy/transfer wait is bounded.
+- The configured last sector is disposable test data.
 
-Typical chain:
+### Power-failure boundary
 
-```text
-SPI timeout
-    |
-board transfer false
-    |
-W25Q64 operation false
-    |
-Memory Service false
-    |
-Application diagnostic/error state
-```
+This example proves command sequencing and readback under normal execution. It does not implement an atomic storage scheme. Power loss during erase/program can leave the test sector partially modified; no metadata journal or redundant copy repairs that state.
 
-Initialization JEDEC failure propagates all the way to `system_panic()`.
+The repository uses `volatile` for state that can change asynchronously, but `volatile` alone is not treated as a lock or a complete synchronization primitive. Where a compound take/clear or block copy must be atomic with respect to an ISR, the code uses a short PRIMASK critical section. Where SPSC ring publication depends on compiler ordering, it uses an explicit compiler barrier.
 
-## 9. Concurrency
+## Timing and memory reasoning
 
-SPI1 is used synchronously by one thread-mode path in this example.
+The project has no heap. Buffers, device state, counters, and Application state are statically or automatically allocated and are therefore visible in the link map.
 
-There is no SPI ISR and no shared bus arbitration.
+Clock-dependent behavior is derived from CMSIS/SPL clock state wherever the example needs exact peripheral timing. The normal board configuration is 72 MHz HCLK, 72 MHz PCLK2, 36 MHz PCLK1, with APB1 timers receiving 72 MHz because their bus prescaler is not 1.
 
-If another device later shares SPI1, explicit ownership/arbitration must be
-added.
+The most important timing-specific behavior for this example is described in its [README](../README.md); source constants under `config/` are authoritative.
 
-## 10. Startup Safety
+## Failure and observability
 
-Board initialization:
+Application exports JEDEC IDs, stage pass flags, error count, first mismatch index, and first/last readback bytes as GDB-friendly globals. The demo validates manufacturer `0xEF` and capacity `0x17`; it intentionally does not require one specific memory-type byte.
 
-1. initializes timebase;
-2. configures LED;
-3. configures SPI/CS;
-4. waits memory power-on delay.
+Initialization failure propagates toward `system_init()` instead of being silently ignored. Runtime diagnostics are deliberately low-overhead: counters, state flags, and GDB-visible globals are preferred to adding a logging subsystem that would change the example's peripheral/concurrency profile.
 
-Only then does Memory Service query JEDEC ID.
+## Extension boundaries
 
-CS is driven HIGH while idle.
+When extending this example:
 
-## 11. Destructive Boundary
+1. keep board pin/peripheral mapping in BSP/configuration;
+2. keep external-device command semantics in ECUAL when an off-chip device is involved;
+3. expose a Service capability rather than an SPL type to Application;
+4. keep ISR work bounded and define the publication/ownership rule before writing the handler;
+5. update `config/modules.mk` only with the SPL sources actually required;
+6. run `make check-layers` before accepting the change;
+7. document any new buffer capacity, timeout, drop policy, interrupt priority, or destructive operation.
 
-The self-test intentionally owns:
+## References
 
-```text
-0x007FF000 .. 0x007FFFFF
-```
+- [Winbond — W25Q64 product search/documentation](https://www.winbond.com/hq/search/?__locale=en&q=W25Q64JV)
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-That boundary must be documented and preserved if other firmware data is added.
 
-Do not let unrelated Application data overlap this region.
+---
 
-## 12. Extension Strategy
-
-For a more capable storage subsystem:
-
-```text
-Application
-    |
-Storage Service
-    |
-record/filesystem layer
-    |
-Memory Service
-    |
-W25Q64 ECUAL
-    |
-Board SPI
-```
-
-Keep erase/program geometry below the higher-level record policy.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

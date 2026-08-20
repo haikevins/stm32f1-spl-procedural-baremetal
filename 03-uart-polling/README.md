@@ -1,285 +1,153 @@
-# 03-uart-polling — USART1 Polling with a Non-Blocking API
+# UART Polling — Non-Blocking USART1
 
-## 1. Learning Objectives
+> **Scope:** Example 3 of the repository progression — USART1 115200 8N1 with `try_read`/`try_write`, no IRQ/DMA, one-byte pending echo state.
 
-This example introduces a byte-stream peripheral without interrupts.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- USART1 TX/RX GPIO setup;
-- 115200 8N1 configuration with SPL;
-- RXNE/TXE polling;
-- non-blocking `try_read` / `try_write`;
-- a small Application state machine for greeting + echo;
-- why polling APIs should return when hardware is not ready.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Wiring
+## Purpose and expected behavior
 
-Use a 3.3 V USB-to-UART adapter:
+After reset the application emits a startup banner one byte at a time whenever TXE says the transmitter can accept a byte. It then polls RXNE. A received byte is retained in one application-owned pending slot until a later TXE poll succeeds, creating a non-blocking echo without interrupt, DMA, delay loops, or an unbounded wait.
 
-```text
-Blue Pill PA9  USART1_TX  ---> adapter RX
-Blue Pill PA10 USART1_RX  <--- adapter TX
-Blue Pill GND              --- adapter GND
-```
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: USART1 115200 8N1 with `try_read`/`try_write`, no IRQ/DMA, one-byte pending echo state.
 
-Terminal:
+## Hardware and wiring
 
-```text
-115200 baud
-8 data bits
-no parity
-1 stop bit
-no flow control
-```
-
-## 3. Expected Behavior
-
-After reset:
+USART1 uses PA9 as alternate-function push-pull TX and PA10 as floating-input RX. Connect a 3.3 V USB-UART adapter with crossed TX/RX and common ground.
 
 ```text
-STM32F103 UART polling ready
-Type characters to echo.
+Blue Pill                 USB-UART (3.3 V)
+-------------------------------------------
+PA9  / USART1_TX  ------> RX
+PA10 / USART1_RX  <------ TX
+GND                 ----- GND
 ```
 
-Typed bytes are echoed back.
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-The greeting and echo are implemented without a blocking transmit loop.
+## Configuration
 
-## 4. Compile-Time Configuration
+| Setting | Value |
+|---|---:|
+| Baud | 115200 bit/s |
+| Data | 8 bits |
+| Parity | none |
+| Stop | 1 |
+| Flow control | none |
+| USART interrupts | disabled |
+| DMA | disabled |
 
-`config/board_config.h`:
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-```c
-#define BOARD_UART_BAUD_RATE (115200UL)
-```
-
-BSP mapping:
+## Source ownership
 
 ```text
-USART1
-TX -> PA9
-RX -> PA10
+app/src/application.c
+  -> uart_service
+services/src/uart_service.c
+  -> board_uart try-read / try-write
+bsp/bluepill/src/board_uart.c
+  -> GPIOA + USART1 / SPL
 ```
 
-## 5. Initialization Flow
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
+
+## Runtime flow
+
+```mermaid
+flowchart TD
+    INIT["Initialize USART1 115200 8N1"] --> BANNER["Startup message has bytes remaining?"]
+    BANNER -- "yes" --> TXREADY{"TXE set?"}
+    TXREADY -- "yes" --> SEND["Write one banner byte"]
+    TXREADY -- "no" --> RETURN["Return to super-loop"]
+    SEND --> RETURN
+    BANNER -- "no" --> PENDING{"Echo byte pending?"}
+    PENDING -- "no" --> RXREADY{"RXNE set?"}
+    RXREADY -- "yes" --> STORE["Read byte and mark pending"]
+    RXREADY -- "no" --> RETURN
+    STORE --> PENDING
+    PENDING -- "yes" --> ECHOTX{"TXE set?"}
+    ECHOTX -- "yes" --> ECHO["Write byte and clear pending"]
+    ECHOTX -- "no" --> RETURN
+    ECHO --> RETURN
+```
+
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### Polling contract
+
+`board_uart_try_read_byte()` returns immediately if RXNE is clear. `board_uart_try_write_byte()` returns immediately if TXE is clear. The Service simply exposes this capability upward. This is very different from code that loops until the flag changes: every call has bounded execution time.
+
+### One-byte backpressure
+
+The application does not consume a second RX byte while the first byte is waiting for TX. That creates a minimal ownership invariant: if `s_echo_pending` is true, `s_echo_byte` is the one byte that must be transmitted before new receive data is accepted.
+
+### Hardware versus software buffering
+
+There is no software RX queue. USART hardware provides only the peripheral data path, so a new character can be lost/overrun if the super-loop does not read DR quickly enough. This limitation is exactly what Example 04 addresses using interrupts and ring buffers.
+
+### Clock dependency
+
+USART1 is on APB2. SPL derives its baud configuration from the peripheral clock assumptions established by the vendor clock tree; changing clocks requires verifying the actual baud error rather than retaining a copied constant.
+
+## Concurrency and ownership
+
+This example is intentionally thread-only for USART. The super-loop is the sole reader/writer; there is no shared UART state with an ISR. That makes it a baseline for understanding why the ownership model changes in Example 04.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-board_init()
-    |
-    +--> SystemCoreClockUpdate()
-    +--> board_uart_init()
-            |
-            +--> enable GPIOA + USART1 clocks
-            +--> configure PA9 TX
-            +--> configure PA10 RX
-            +--> USART 115200 8N1
-            +--> enable RX and TX
-            +--> enable USART1
-
-system_init()
-    |
-    +--> uart_service_init()
-    +--> application_init()
+board USART1 → UART Service → Application
 ```
 
-## 6. GPIO Configuration
+The current API does not surface framing/parity/noise/overrun diagnostics to Application. It demonstrates readiness polling, not a production serial error-recovery channel.
 
-### TX — PA9
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-PA9 is configured as:
-
-```text
-GPIO_Mode_AF_PP
-GPIO_Speed_50MHz
-```
-
-USART1 drives the pin through the alternate-function output.
-
-### RX — PA10
-
-PA10 is configured as:
-
-```text
-GPIO_Mode_IN_FLOATING
-```
-
-The USB-UART adapter drives the RX logic level.
-
-## 7. Baud-Rate Register
-
-This project lets SPL calculate the USART baud configuration from the current
-peripheral clock and requested baud rate.
-
-The important architecture point is that Application specifies only the logical
-baud configuration through project config; it does not calculate BRR or know
-PCLK2.
-
-When changing the clock tree, verify the actual baud with a terminal or logic
-analyzer.
-
-## 8. USART Setup
-
-`USART_StructInit()` provides defaults, then the BSP explicitly sets:
-
-```text
-baud: 115200
-word length: 8 bits
-stop bits: 1
-parity: none
-hardware flow control: none
-mode: RX + TX
-```
-
-Then:
-
-```c
-USART_Init(...);
-USART_Cmd(..., ENABLE);
-```
-
-## 9. Polling Receive Path
-
-```text
-Application
-    |
-UART Service
-    |
-board_uart_try_read_byte()
-    |
-RXNE set?
-    |
-    +--> no  -> false
-    |
-    +--> yes -> USART_ReceiveData()
-                return byte
-```
-
-There is no wait loop.
-
-## 10. Polling Transmit Path
-
-```text
-Application
-    |
-UART Service
-    |
-board_uart_try_write_byte()
-    |
-TXE set?
-    |
-    +--> no  -> false
-    |
-    +--> yes -> USART_SendData()
-                true
-```
-
-The Application returns to the super-loop whenever TX hardware is not ready.
-
-## 11. Application State Machine
-
-First phase: send the greeting one byte at a time.
-
-```text
-startup_message_index < message_length?
-    |
-    +--> try_write(current byte)
-            |
-            +--> success -> advance index
-            +--> busy    -> return
-```
-
-Second phase: echo.
-
-```text
-no pending echo?
-    |
-    +--> try_read
-           |
-           +--> byte -> save it, mark pending
-
-pending echo?
-    |
-    +--> try_write
-           |
-           +--> success -> clear pending
-```
-
-## 12. Why `s_echo_pending` Is Required
-
-RX and TX readiness are independent.
-
-A byte may be received while TXE is not ready.
-
-Without a pending state, the Application would either:
-
-- block waiting for TXE, or
-- lose the received byte.
-
-One pending byte bridges the two non-blocking operations.
-
-## 13. Error Mapping
-
-This minimal polling example does not expose detailed USART error counters.
-
-That omission is intentional so the example focuses on basic polling.
-
-Example 04 adds explicit receive error and overflow handling.
-
-## 14. Debug Symbols
-
-Useful Application state:
-
-```text
-s_startup_message_index
-s_echo_pending
-s_echo_byte
-```
-
-Useful breakpoints:
-
-```gdb
-break board_uart_try_read_byte
-break board_uart_try_write_byte
-break application_process
-```
-
-## 15. Interrupt Policy
-
-USART1 interrupts are not enabled.
-
-`USART1_IRQHandler` remains the weak startup default.
-
-This makes the polling model easy to compare with Example 04.
-
-## 16. Idle Behavior
-
-The example uses `__NOP()` in `system_idle()`.
-
-The super-loop therefore polls frequently without sleeping.
-
-## 17. Architecture
-
-```text
-Application
-    |
-UART Service
-    |
-Board UART
-    |
-USART/GPIO/RCC SPL
-```
-
-Application never includes an SPL header.
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -289,56 +157,35 @@ make debug-server
 make debug
 ```
 
-## 18. Test Procedure
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-1. Wire the USB-UART adapter.
-2. Open a 115200 8N1 terminal.
-3. Reset the MCU.
-4. Verify the greeting.
-5. Type single characters.
-6. Verify each character is echoed.
-7. Paste a short string and observe polling limitations.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-## 19. Troubleshooting
+## Design decisions and limitations
 
-### No Greeting
+- Very small state and simple ownership, but latency depends on super-loop frequency.
+- No software receive buffering; sustained input can outrun thread-mode polling.
+- One-byte-per-process behavior for the startup banner intentionally preserves cooperative scheduling instead of maximizing throughput.
 
-Check:
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-- TX/RX wiring is crossed correctly;
-- common ground;
-- adapter voltage level;
-- PA9 mode;
-- USART1 clock;
-- TXE status.
+## Porting boundary
 
-### Greeting Is Garbage
+When changing UART instance/pins, verify APB bus, AF pin modes/remap, peripheral clock, baud error, and voltage levels. If moving to interrupt/DMA operation, the public Service can remain non-blocking while the BSP implementation gains buffering.
 
-Check:
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-- terminal baud;
-- system/PCLK2 clock;
-- `BOARD_UART_BAUD_RATE`;
-- 8N1 settings.
+## References
 
-### Typing Does Not Echo
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-If greeting works, TX is already proven.
 
-Focus on:
+---
 
-- PA10 wiring;
-- adapter TX;
-- RXNE;
-- `board_uart_try_read_byte()`.
-
-### Bytes Are Lost During Fast Input
-
-That is an expected limitation of this polling/no-buffer design.
-
-Use Example 04 when bursts must be retained asynchronously.
-
-## 20. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

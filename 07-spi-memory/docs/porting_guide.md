@@ -1,133 +1,122 @@
-# Porting Guide — 07-spi-memory
+# Porting Guide — SPI Memory — W25Q64 NOR Flash
 
-## 1. Changing SPI/CS Pins on STM32F103
+> **Scope:** What must be re-validated when `07-spi-memory` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-Update Board Memory Bus mappings:
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-- SCK;
-- MISO;
-- MOSI;
-- CS;
-- GPIO clocks;
-- remap if required.
+## Table of contents
 
-Keep W25Q64 ECUAL unchanged.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-## 2. Moving to SPI2
+## Porting principle
 
-Review:
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-- SPI2 APB bus;
-- GPIO mapping;
-- RCC clock;
-- prescaler input clock;
-- SPL peripheral instance.
+For this example, the stable logical behavior is: SPI1 mode 0, software chip select, JEDEC identification, WEL/BUSY state, sector erase/page program/readback self-test.
 
-The Memory Service and W25Q64 driver should remain unchanged.
+## Change matrix
 
-## 3. Changing SPI Frequency
+| Change | Primary review |
+|---|---|
+| SPI pins/instance | BSP GPIO/SPI clock/mode/CS |
+| max bus clock | prescaler selection from actual PCLK |
+| flash device | JEDEC ID, commands, WEL/BUSY, page/sector geometry, address width |
+| persistent use | remove destructive reset test; add allocation/wear/power-fail policy above ECUAL |
 
-Update:
+## Same MCU, different board
 
-```c
-BOARD_MEMORY_SPI_MAX_HZ
-```
+For another SPI flash, do not assume command set/status bits/page size/erase geometry or JEDEC capacity encoding are identical. If the device stays W25Q64 but the board changes, isolate changes to BSP pin/SPI clock/CS ownership where possible.
 
-The BSP selects a prescaler that does not exceed the configured maximum.
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Verify actual SCK with a logic analyzer.
+## Clock and timing re-validation
 
-## 4. Using a Different Flash Capacity
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-Review together:
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-- total size;
-- JEDEC capacity code;
-- address width;
-- page size;
-- sector size;
-- erase commands;
-- test sector.
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-Do not change only the capacity ID.
+## Interrupt and concurrency re-validation
 
-## 5. Changing the Test Sector
-
-Choose an aligned 4 KiB sector inside the device.
-
-Document that the region is destructive.
-
-Verify it does not overlap boot/config/user data.
-
-## 6. Multi-Page Programming
-
-The current Page Program function refuses to cross one 256-byte page.
-
-A higher-level multi-page helper should split a buffer:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-remaining bytes
-    |
-current page free space
-    |
-program chunk
-    |
-advance address
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-Do not remove the page-boundary check.
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-## 7. Runtime Asynchronous Operation
+SPI is polling/thread-mode only; SysTick continues to interrupt so timeouts and heartbeat time remain valid. There is no bus arbitration because this example has one SPI client.
 
-If long erase/program latency becomes unacceptable, convert the Memory Service
-to a state machine:
+## Moving across STM32F1 or MCU families
 
-```text
-start operation
-poll status in service_process()
-publish completion event
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
+
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
+
+## Validation sequence
+
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
 ```
 
-Keep SPI/device ownership below Application.
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
 
-## 8. Shared SPI Bus
+## Failure signatures
 
-Add a bus-ownership mechanism if another SPI device shares SCK/MISO/MOSI.
+Useful porting clues:
 
-Each device keeps a separate CS.
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
 
-Bus configuration must remain compatible or be reconfigured safely per device.
+## References
 
-## 9. Porting to Another MCU
+- [Winbond — W25Q64 product search/documentation](https://www.winbond.com/hq/search/?__locale=en&q=W25Q64JV)
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-Keep:
 
-```text
-Memory Service -> W25Q64 ECUAL
-```
+---
 
-Replace Board Memory Bus and vendor SPI implementation.
-
-## 10. Validation Checklist
-
--  CS idle HIGH;
--  SPI mode 0 correct;
--  SCK below configured maximum;
--  JEDEC ID correct;
--  WEL sets after Write Enable;
--  BUSY clears after program/erase;
--  read-back matches;
--  test sector is safe/destructive by design;
--  layer checker passes.
-
-## 11. Common Pitfalls
-
-- D0/D1 reversed;
-- using 5 V;
-- CS toggled between command and address/data;
-- wrong SPI mode;
-- forgetting dummy clocks on reads;
-- crossing page boundary;
-- not issuing Write Enable;
-- using an unbounded BUSY loop;
-- erasing data outside the documented test region.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

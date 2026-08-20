@@ -1,155 +1,139 @@
-# Architecture — 04-uart-interrupt-ring-buffer
+# Architecture — UART Interrupt + Ring Buffer
 
-## 1. Dependency Graph
+> **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `04-uart-interrupt-ring-buffer`.
 
-```text
-Application
-    |
-UART Service
-    |
-Board UART
-    |
-    +--> Common RX ring
-    +--> Common TX ring
-    |
-USART1 SPL + CMSIS NVIC
-```
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-## 2. Ownership
+## Table of contents
 
-| State/resource | Producer | Consumer | Owner |
-|---|---|---|---|
-| USART1 RX data | hardware/ISR | RX ring | Board UART |
-| RX ring | ISR | thread | Board UART/Common |
-| TX ring | thread | ISR | Board UART/Common |
-| RX error counter | ISR | debug/thread | Board UART |
-| overflow counter | ISR | debug/thread | Board UART |
-| echo policy | thread | — | Application |
+- [Architectural objective](#architectural-objective)
+- [Layer and source map](#layer-and-source-map)
+- [Composition and initialization](#composition-and-initialization)
+- [Runtime data flow](#runtime-data-flow)
+- [Concurrency contract](#concurrency-contract)
+- [Timing and memory reasoning](#timing-and-memory-reasoning)
+- [Failure and observability](#failure-and-observability)
+- [Extension boundaries](#extension-boundaries)
+- [References](#references)
 
-## 3. Ring-Buffer Concurrency Contract
+## Architectural objective
 
-The Common ring requires exactly one producer and one consumer.
+This example is not organized around “one source file per peripheral demo.” It keeps the repository's core rule: **Application expresses policy; lower layers own mechanisms and physical resources**. The concrete subject is USART1 asynchronous RX/TX using two SPSC rings, error accounting, TXE interrupt gating, bounded application work.
 
-RX:
+The design should remain understandable in both directions:
+
+- reading downward explains how a logical request reaches STM32 hardware;
+- reading upward explains how low-level hardware state becomes a bounded, meaningful event/capability for Application.
+
+## Layer and source map
 
 ```text
-ISR -> head
-thread -> tail
+app/src/application.c
+  -> uart_service
+services/src/uart_service.c
+  -> board_uart buffered API
+bsp/bluepill/src/board_uart.c
+  -> USART1 ISR + two byte_ring_buffer instances
+common/src/byte_ring_buffer.c
+  -> generic SPSC storage mechanics
 ```
 
-TX:
+```mermaid
+flowchart TD
+    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
+    SYS --> SVC["services: logical capability"]
+    SYS --> BSP["bsp/bluepill: resource ownership"]
+    APP --> SVC
+    SVC --> BSP
+    SVC --> ECUAL["ecual: off-chip protocol when used"]
+    ECUAL --> BSP
+    BSP --> SPL["SPL/CMSIS"]
+    SPL --> HW["STM32 / external hardware"]
+```
+
+The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
+
+## Composition and initialization
+
+The reset path is common to the repository. After `.data/.bss` initialization and `SystemInit()`, `main()` delegates composition to `system_init()`.
+
+For this example the important dependency order is:
 
 ```text
-thread -> head
-ISR -> tail
+board USART/ring state → UART Service → Application
 ```
 
-This avoids two contexts updating the same index.
+The order matters because a module should never receive events or invoke a dependency before its state is valid. Peripheral flags are cleared and NVIC lines are configured only after associated storage/state is ready.
 
-## 4. RX Data Lifecycle
+## Runtime data flow
 
-```text
-USART DR
-    |
-ISR reads byte
-    |
-RX ring
-    |
-UART Service
-    |
-Application
+```mermaid
+flowchart LR
+    UART_RX["USART1 RX hardware"] --> RX_ISR["USART1_IRQHandler RX producer"]
+    RX_ISR --> RX_RING["RX ring: 128 storage / 127 usable"]
+    RX_RING --> APP["Application consumer"]
+    APP --> TX_RING["TX ring: thread producer"]
+    TX_RING --> TX_ISR["USART1_IRQHandler TX consumer"]
+    TX_ISR --> UART_TX["USART1 TX hardware"]
 ```
 
-If the ring is full, the newest arriving byte is discarded and overflow is
-counted.
+Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
-## 5. TX Data Lifecycle
+## Concurrency contract
 
-```text
-Application
-    |
-UART Service
-    |
-TX ring
-    |
-TXE interrupt
-    |
-USART DR
-```
+This is the first example with continuous bidirectional ISR/thread shared data. Correctness depends on single-producer/single-consumer ownership, volatile index observation, compiler barriers, and never allowing a second producer/consumer to mutate a ring.
 
-The producer never waits for one hardware byte to physically finish before
-queueing the next available byte.
+### Key invariants
 
-## 6. TXE Interrupt Lifecycle
+- RX head is published only by ISR; RX tail only by thread.
+- TX head is published only by thread; TX tail only by ISR.
+- One slot remains unused to distinguish full from empty.
+- TXEIE is off when no queued byte exists.
+- Hardware error/overflow paths count loss rather than blocking or recursing upward.
 
-TXE interrupt is demand-driven:
+### Memory-order reasoning
 
-```text
-ring receives data -> enable TXEIE
-ring becomes empty -> disable TXEIE
-```
+The producer stores payload data before publishing the new head index; the consumer reads the published index before consuming payload. The compiler barriers constrain reordering at that publication boundary. On Cortex-M3 with normal SRAM and this SPSC contract, this is enough for the repository's intended use; a different architecture/cache/multi-core model would need re-evaluation.
 
-Leaving TXEIE enabled while TXE remains asserted would repeatedly re-enter the
-handler.
+The repository uses `volatile` for state that can change asynchronously, but `volatile` alone is not treated as a lock or a complete synchronization primitive. Where a compound take/clear or block copy must be atomic with respect to an ISR, the code uses a short PRIMASK critical section. Where SPSC ring publication depends on compiler ordering, it uses an explicit compiler barrier.
 
-## 7. Hardware Error Handling
+## Timing and memory reasoning
 
-Receive errors are captured at the same low-level point where SR/DR are read.
+The project has no heap. Buffers, device state, counters, and Application state are statically or automatically allocated and are therefore visible in the link map.
 
-The board layer converts hardware status into counters rather than pushing raw
-USART status to Application.
+Clock-dependent behavior is derived from CMSIS/SPL clock state wherever the example needs exact peripheral timing. The normal board configuration is 72 MHz HCLK, 72 MHz PCLK2, 36 MHz PCLK1, with APB1 timers receiving 72 MHz because their bus prescaler is not 1.
 
-## 8. Memory Ordering
+The most important timing-specific behavior for this example is described in its [README](../README.md); source constants under `config/` are authoritative.
 
-The ring implementation uses compiler memory barriers around:
+## Failure and observability
 
-- publishing a new head;
-- observing producer head before reading data;
-- publishing a new tail.
+The BSP counts RX overflow and UART hardware errors. These counters make overload/noise observable without doing formatted logging in the ISR. The application itself keeps echo semantics simple and does not attempt retransmission or a framed protocol.
 
-The barriers prevent compiler reordering from violating the intended
-producer/consumer sequence.
+Initialization failure propagates toward `system_init()` instead of being silently ignored. Runtime diagnostics are deliberately low-overhead: counters, state flags, and GDB-visible globals are preferred to adding a logging subsystem that would change the example's peripheral/concurrency profile.
 
-## 9. Application Processing Budget
+## Extension boundaries
 
-The fixed budget prevents UART work from monopolizing thread mode.
+When extending this example:
 
-This is a fairness mechanism, not a hardware requirement.
+1. keep board pin/peripheral mapping in BSP/configuration;
+2. keep external-device command semantics in ECUAL when an off-chip device is involved;
+3. expose a Service capability rather than an SPL type to Application;
+4. keep ISR work bounded and define the publication/ownership rule before writing the handler;
+5. update `config/modules.mk` only with the SPL sources actually required;
+6. run `make check-layers` before accepting the change;
+7. document any new buffer capacity, timeout, drop policy, interrupt priority, or destructive operation.
 
-A larger application can apply similar budgets to other Services.
+## References
 
-## 10. Failure/Overflow Model
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-The example favors bounded behavior:
 
-- ring full -> return `false`;
-- RX overflow -> drop + count;
-- UART receive error -> count;
-- no dynamic allocation;
-- no blocking wait for space.
+---
 
-## 11. ISR Boundary
-
-Correct:
-
-```text
-ISR -> rings/counters -> thread
-```
-
-Incorrect:
-
-```text
-ISR -> echo policy -> Application
-```
-
-## 12. Extension Strategy
-
-Possible extensions:
-
-- line-oriented receive Service;
-- packet framing;
-- larger rings;
-- flow control;
-- DMA-backed UART.
-
-Preserve the board-level byte transport boundary when adding protocol logic.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

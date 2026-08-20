@@ -1,131 +1,121 @@
-# Porting Guide — 02-gpio-input-interrupt
+# Porting Guide — GPIO Input Interrupt — EXTI + Debounce
 
-## 1. Moving the Button to Another Pin on STM32F103
+> **Scope:** What must be re-validated when `02-gpio-input-interrupt` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-Update together:
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-- GPIO port;
-- GPIO pin;
-- GPIO clock;
-- AFIO port source;
-- EXTI pin source;
-- EXTI line;
-- IRQ vector.
+## Table of contents
 
-Example: moving from PA0 to PB8 also changes the handler group because EXTI8
-uses `EXTI9_5_IRQHandler()`.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-## 2. Changing Polarity
+## Porting principle
 
-For an active-high button:
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-- configure a pull-down or external bias as appropriate;
-- select the correct EXTI edge;
-- update `BOARD_USER_BUTTON_ACTIVE_LOW`;
-- verify `board_button_is_pressed()`.
+For this example, the stable logical behavior is: active-low button, AFIO/EXTI mapping, minimal ISR publication, deferred 30 ms debounce.
 
-Service/Application logic should remain unchanged.
+## Change matrix
 
-## 3. Using an External Pull-Up
+| Change | Primary review |
+|---|---|
+| button pin | GPIO mode + AFIO EXTI source + `board_pins.h` |
+| EXTI line | vector/IRQ grouping, pending-bit handling, handler name |
+| active polarity | edge trigger and physical read semantics |
+| debounce | `BUTTON_DEBOUNCE_TIME_MS` and desired press/release semantics |
 
-Change GPIO mode from internal pull-up to a floating/input mode appropriate for
-the external resistor network.
+## Same MCU, different board
 
-Keep the logical pressed polarity explicit.
+Porting requires reviewing GPIO electrical mode, active polarity, AFIO EXTI source, EXTI line/group IRQ name, NVIC priority, and the debounce interval. Application should still consume only a logical pressed event.
 
-## 4. Changing Debounce
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Update:
+## Clock and timing re-validation
 
-```c
-#define BUTTON_DEBOUNCE_TIME_MS (...)
-```
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-Shorter values react faster but may allow bounce. Longer values reject more
-bounce but delay event publication.
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-Do not convert debounce into a blocking delay.
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-## 5. Changing IRQ Priority
+## Interrupt and concurrency re-validation
 
-Review the whole project priority scheme before changing priority.
-
-Higher urgency should be justified by latency requirements, not convenience.
-
-The handler remains short regardless of priority.
-
-## 6. Porting to Another STM32F1
-
-Verify:
-
-- GPIO/AFIO availability;
-- EXTI routing;
-- vector name;
-- NVIC implementation;
-- SPL device support;
-- startup vector table.
-
-## 7. Porting to Another MCU Family
-
-Preserve:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-raw edge -> Button Service debounce -> Application event
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-Replace:
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-- GPIO implementation;
-- external interrupt controller;
-- NVIC/vendor layer;
-- startup/vector names.
+SysTick updates time; EXTI0 publishes the raw candidate. PRIMASK protects take-and-clear. Debounce state and logical pressed-event state are owned by thread mode.
 
-## 8. Verification Checklist
+## Moving across STM32F1 or MCU families
 
--  released input has a stable idle level;
--  one physical press produces an interrupt;
--  pending flag clears;
--  raw event transfers to thread mode;
--  debounce delay is correct;
--  one press produces one logical event;
--  LED toggles only through Indication Service.
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
 
-## 9. GDB Checklist
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
 
-Break at:
+## Validation sequence
 
-```gdb
-break EXTI0_IRQHandler
-break button_service_process
-break indication_service_toggle
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
 ```
 
-Inspect the raw flag, debounce state, and pending Service event.
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
 
-## 10. Logic Analyzer/Oscilloscope
+## Failure signatures
 
-Probe PA0 if bounce behavior is unclear.
+Useful porting clues:
 
-Compare:
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
 
-```text
-physical bouncing edge train
-```
+## References
 
-with:
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-```text
-single logical Application action
-```
 
-The difference demonstrates why debounce belongs outside the ISR.
+---
 
-## 11. Common Mistakes
-
-- changing GPIO pin but not EXTI port source;
-- using the wrong grouped EXTI handler;
-- forgetting input bias;
-- clearing the pending flag incorrectly;
-- calling Application from ISR;
-- busy-waiting 30 ms in ISR;
-- reading and clearing shared state without atomicity.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

@@ -1,356 +1,227 @@
-# STM32F1 SPL Procedural Bare-Metal Examples
+# STM32F1 SPL Procedural Bare-Metal — Examples
 
-## 1. Philosophy of the Example Series
+> **Scope:** Eight independently buildable projects that introduce STM32F103 peripherals and increasingly sophisticated data-handoff patterns while preserving the same layered firmware architecture.
 
-The examples are intentionally progressive rather than independent feature
-demos.
+[← Root README](../README.md) · [Reusable template](../template/README.md)
 
-Every project preserves the same high-level rules:
+## Table of contents
 
-```text
-Application -> Services -> BSP/ECUAL -> SPL/CMSIS -> Hardware
+- [Learning model](#learning-model)
+- [Roadmap](#roadmap)
+- [Cross-example comparison](#cross-example-comparison)
+- [Wiring summary](#wiring-summary)
+- [Common architecture](#common-architecture)
+- [Concurrency progression](#concurrency-progression)
+- [Build and debug workflow](#build-and-debug-workflow)
+- [How to read each example](#how-to-read-each-example)
+- [References](#references)
+
+## Learning model
+
+The examples are intentionally progressive. The peripheral changes, but the architectural vocabulary does not:
+
+```mermaid
+flowchart LR
+    E1["01 GPIO + SysTick"] --> E2["02 EXTI handoff"]
+    E2 --> E3["03 UART polling"]
+    E3 --> E4["04 UART IRQ + rings"]
+    E4 --> E5["05 hardware PWM"]
+    E5 --> E6["06 I2C + ECUAL"]
+    E6 --> E7["07 SPI NOR protocol"]
+    E7 --> E8["08 ADC + DMA pipeline"]
 ```
 
-Only the peripheral topic changes.
+Each stage asks two questions at once:
 
-The objective is to learn both **how the STM32 peripheral works** and **where
-that behavior belongs architecturally**.
+1. **How does this STM32 peripheral mechanism work?**
+2. **Which layer should own each part of that mechanism?**
 
-## 2. Recommended Learning Roadmap
+This prevents the examples from degenerating into unrelated `main.c` snippets.
 
-### Step 1 — GPIO and Timebase
+## Roadmap
 
-Start with `01-blink-led`.
+### 01 — GPIO output and timebase
 
-Learn:
+[Open Example 01](01-blink-led/README.md)
 
-- active-low board resources;
-- GPIO output initialization;
-- SysTick timebase;
-- non-blocking periodic scheduling;
-- logical indicator Service.
+PC13 active-low LED + 1 kHz SysTick. Introduces board polarity, Service abstraction, wrap-safe millisecond time, and a cooperative periodic action.
 
-### Step 2 — Input Interrupt
+### 02 — EXTI input and debounce
 
-Continue with `02-gpio-input-interrupt`.
+[Open Example 02](02-gpio-input-interrupt/README.md)
 
-Learn:
+PA0 active-low button with internal pull-up. EXTI0 publishes a minimal event; a Service performs 30 ms debounce later in thread mode. This is the first explicit interrupt-to-super-loop handoff.
 
-- internal pull-up;
-- AFIO/EXTI mapping;
-- falling-edge interrupt;
-- ISR-to-thread event handoff;
-- debounce outside the ISR;
-- short critical sections.
+### 03 — Non-blocking UART polling
 
-### Step 3 — UART Polling
+[Open Example 03](03-uart-polling/README.md)
 
-Use `03-uart-polling`.
+USART1 at 115200 8N1. `try_read`/`try_write` expose hardware readiness without blocking; the application stores at most one pending echo byte.
 
-Learn:
+### 04 — UART interrupts and ring buffers
 
-- USART1 GPIO modes;
-- 115200 8N1;
-- RXNE/TXE polling;
-- `try_read`/`try_write`;
-- non-blocking echo state.
+[Open Example 04](04-uart-interrupt-ring-buffer/README.md)
 
-### Step 4 — UART Interrupt + Ring Buffer
+The same USART becomes asynchronous. RX/TX 128-byte arrays are used as SPSC rings with 127-byte usable capacity. The USART ISR and main loop have explicit producer/consumer ownership, and TXE interrupts are enabled only while data needs draining.
 
-Use `04-uart-interrupt-ring-buffer`.
+### 05 — Timer-generated PWM
 
-Learn:
+[Open Example 05](05-timer-pwm/README.md)
 
-- RX/TX rings;
-- single-producer/single-consumer ownership;
-- TXE interrupt start/stop;
-- RX overflow;
-- UART error counters;
-- bounded Application processing.
+TIM2_CH1 on PA0 runs a 1 kHz hardware waveform from a 1 MHz timer tick. The application updates only CCR-derived duty policy every 10 ms; waveform edges are entirely hardware-owned.
 
-### Step 5 — Timer PWM
+### 06 — I2C and an external display device
 
-Use `05-timer-pwm`.
+[Open Example 06](06-i2c-display/README.md)
 
-Learn:
+I2C1 at 400 kHz drives an SSD1306 through an ECUAL driver and 1024-byte framebuffer. The example separates bus electrical/timing ownership from SSD1306 command semantics and display policy.
 
-- TIM2_CH1;
-- APB1 timer clock x2 rule;
-- PSC/ARR/CCR concepts;
-- hardware PWM;
-- preload;
-- separating waveform generation from scheduling.
+### 07 — SPI NOR memory
 
-### Step 6 — I2C + External Device
+[Open Example 07](07-spi-memory/README.md)
 
-Use `06-i2c-display`.
+SPI1 mode 0 drives a W25Q64. The ECUAL layer models JEDEC ID, WEL/BUSY, sector erase, page programming, and readback. A destructive reset-time self-test validates one 32-byte pattern in the last 4 KiB sector.
 
-Learn:
+### 08 — Timer-triggered ADC + circular DMA
 
-- PB6/PB7 I2C1 wiring;
-- open-drain bus;
-- bounded polling;
-- SSD1306 command/data control bytes;
-- framebuffer rendering;
-- ECUAL ownership.
+[Open Example 08](08-adc-dma/README.md)
 
-### Step 7 — SPI Flash
+TIM3 TRGO triggers ADC1 at 1 ksample/s; DMA1 Channel 1 fills a 64-sample circular buffer. Half/full interrupts copy 32-sample blocks into a one-slot staging buffer, then thread mode computes min/max/average/millivolts and drives LED hysteresis.
 
-Use `07-spi-memory`.
+## Cross-example comparison
 
-Learn:
+| Example | Peripheral owner | Interrupt source | Handoff / processing model | Main timing characteristic |
+|---|---|---|---|---|
+| 01 | BSP timebase + LED | SysTick | volatile millisecond counter | 500 ms toggle |
+| 02 | BSP button/timebase | EXTI0, SysTick | edge flag + PRIMASK take + debounce | 30 ms qualification |
+| 03 | BSP UART | none | direct non-blocking polling | loop-frequency dependent |
+| 04 | BSP UART | USART1 | SPSC RX/TX rings | 32 operations max/application call |
+| 05 | BSP PWM/timebase | SysTick only | hardware PWM; thread changes duty | 1 kHz carrier, 10 ms duty step |
+| 06 | BSP I2C/timebase | SysTick | synchronous bounded I2C + framebuffer | 400 kHz bus, 100 ms UI step |
+| 07 | BSP SPI/timebase | SysTick | synchronous bounded NOR transactions | erase may wait up to 2 s |
+| 08 | BSP ADC/DMA | DMA1 CH1 | ISR block copy + one-slot latest block | 1 ksample/s, 32 ms block |
 
-- SPI1 mode 0;
-- software chip select;
-- W25Q64 JEDEC ID;
-- BUSY/WEL;
-- 4 KiB sector erase;
-- 256-byte page-program constraints;
-- destructive self-test.
+## Wiring summary
 
-### Step 8 — ADC + DMA Pipeline
-
-Use `08-adc-dma`.
-
-Learn:
-
-- timer-triggered ADC;
-- ADC calibration;
-- circular DMA;
-- half/full-transfer interrupts;
-- block handoff;
-- average/min/max/mV processing;
-- hysteresis.
-
-## 3. Summary Table
-
-| Example | Main hardware | Interrupts | Main software pattern |
-|---|---|---|---|
-| 01 | PC13 + SysTick | SysTick | periodic Service |
-| 02 | PA0 + EXTI0 | SysTick, EXTI0 | edge event + debounce |
-| 03 | USART1 | none | polling |
-| 04 | USART1 | USART1 | RX/TX ring buffers |
-| 05 | TIM2_CH1 + SysTick | SysTick | hardware PWM + scheduled duty |
-| 06 | I2C1 + SSD1306 | SysTick | framebuffer + bounded polling |
-| 07 | SPI1 + W25Q64 | SysTick | synchronous NOR transactions |
-| 08 | TIM3 + ADC1 + DMA1 CH1 | DMA1 CH1 | sampled-data block pipeline |
-
-## 4. Wiring Summary
-
-### SWD — Used by Every Example
+### SWD — all examples
 
 ```text
-ST-Link      Blue Pill
-----------------------
-SWDIO   ---> PA13 / SWDIO
-SWCLK   ---> PA14 / SWCLK
-GND     ---> GND
-3.3V    ---> 3.3V reference
-```
-
-### Example 02 — Button
-
-```text
-PA0 ---- push button ---- GND
-```
-
-PA0 uses the internal pull-up.
-
-### Examples 03/04 — USB-UART
-
-```text
-PA9  USART1_TX  ---> USB-UART RX
-PA10 USART1_RX  <--- USB-UART TX
-GND              --- USB-UART GND
-```
-
-Use a 3.3 V adapter and `115200 8N1`.
-
-### Example 05 — PWM LED
-
-```text
-PA0 / TIM2_CH1 ---- 330 ohm ---- LED ---- GND
-```
-
-### Example 06 — OLED I2C
-
-```text
-Blue Pill      SSD1306
-----------------------
-3.3V       ---> VCC
-GND        ---> GND
-PB6        ---> SCL
-PB7        ---> SDA
-```
-
-### Example 07 — W25Q64
-
-```text
-STM32F103C8T6       W25Q64
+ST-Link            Blue Pill
 --------------------------------
-3.3V        ------  VCC
-GND         ------  GND
-PA4         ------  CS
-PA5         ------  CLK
-PA6         ------  D1 / DO / MISO
-PA7         ------  D0 / DI / MOSI
+SWDIO      ------> PA13 / SWDIO
+SWCLK      ------> PA14 / SWCLK
+GND        ------- GND
+3.3 V ref  ------- 3.3 V
 ```
 
-### Example 08 — Analog Input
+The OpenOCD configuration does not require NRST.
+
+### Example-specific I/O
+
+| Example | Wiring |
+|---|---|
+| 01 | onboard PC13 LED only |
+| 02 | PA0 → push button → GND; internal pull-up enabled |
+| 03/04 | PA9 TX → USB-UART RX, PA10 RX ← USB-UART TX, common GND, 3.3 V logic |
+| 05 | PA0/TIM2_CH1 → 330 Ω → LED → GND |
+| 06 | PB6 → SSD1306 SCL, PB7 ↔ SDA, 3.3 V/GND; bus requires pull-ups |
+| 07 | PA4 CS, PA5 SCK, PA6 MISO, PA7 MOSI to W25Q64; 3.3 V/GND |
+| 08 | analog source/potentiometer wiper → PA0/ADC1_IN0; source must remain within MCU analog limits |
+
+## Common architecture
 
 ```text
-3.3 V ---- potentiometer ---- GND
-                  |
-                  +---- PA0 / ADC1_IN0
+Application policy
+       |
+       v
+Services
+   |          v        v
+ BSP      ECUAL
+   ^        |
+   +--------+
+       |
+       v
+SPL / CMSIS
+       |
+       v
+STM32 + off-chip hardware
 ```
 
-## 5. Common Build/Flash Flow
+`system/system_init.c` is the composition root in every project. Peripheral-specific initialization lives below it, and Application does not include raw board/vendor headers. `tools/scripts/check_layers.py` enforces this include-dependency contract.
 
-From an example directory:
+## Concurrency progression
+
+The sequence is deliberately educational:
+
+```text
+01: periodic counter
+      ↓
+02: ISR flag -> thread-mode qualification
+      ↓
+03: thread-only hardware polling
+      ↓
+04: ISR/thread SPSC byte streams
+      ↓
+05: hardware waveform engine + slow software control
+      ↓
+06/07: bounded synchronous device transactions
+      ↓
+08: hardware trigger -> ADC -> DMA -> ISR block publication -> thread processing
+```
+
+A recurring invariant is that higher-level policy is never executed inside the lowest-level interrupt handler.
+
+## Build and debug workflow
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
 
-Useful targets:
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
 
 ```bash
 make size
 make tree
+make flash
 make erase
-```
-
-## 6. Common Debug Flow
-
-Terminal 1:
-
-```bash
 make debug-server
-```
-
-Terminal 2:
-
-```bash
 make debug
 ```
 
-The OpenOCD configuration uses `reset_config none`.
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
 
-## 7. Common Clock Behavior
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
 
-The examples call CMSIS/SPL clock helpers instead of assuming one universal
-peripheral clock.
-
-Important STM32F1 rules:
-
-- core timebase derives from `SystemCoreClock`;
-- TIM2/TIM3 are on APB1;
-- an APB timer receives 2 x PCLK when its APB prescaler is not 1;
-- USART1 and SPI1 are on APB2;
-- I2C1 is on APB1;
-- ADC1 is on APB2 and must respect the ADC clock limit.
-
-## 8. Architecture and Layer Checker
-
-The source dependency direction is:
-
-```text
-Application
-    |
-    v
-Services
-    |
-    +--> BSP
-    |
-    +--> ECUAL
-             |
-             v
-      Board bus APIs
-             |
-             v
-      SPL / CMSIS
-```
-
-Run:
+A typical two-terminal session is:
 
 ```bash
-make check-layers
+# Terminal 1
+make debug-server
+
+# Terminal 2
+make debug
 ```
 
-If the checker rejects an include, treat that as an architecture problem first,
-not as a tooling inconvenience.
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-## 9. Interrupt Ownership and Thread Mode
+## How to read each example
 
-Interrupts are intentionally low-level.
+Each example contains three first-party documentation entry points:
 
-Examples:
+- `README.md` — what the project does, hardware, exact configuration, mechanism, validation, and trade-offs;
+- `docs/architecture.md` — ownership, initialization, data flow, concurrency, invariants, and failure propagation;
+- `docs/porting_guide.md` — what must change when pins, clocks, buses, devices, or MCU family change.
 
-- EXTI0 captures the button edge only.
-- USART1 moves bytes between hardware and rings.
-- DMA1 CH1 publishes completed ADC blocks.
-- SysTick increments the board timebase.
+Use the README first, then architecture, then porting. The source remains authoritative when behavior and documentation ever disagree.
 
-Debounce, echo policy, display rendering, memory verification, ADC statistics,
-and LED threshold decisions remain in normal thread mode.
+## References
 
-## 10. `system_idle()` in the Example Series
-
-All concrete examples use `__NOP()` in `system_idle()`.
-
-This keeps SWD interaction simple for the ST-Link setup used with
-`reset_config none`.
-
-The separate `template/` currently demonstrates `__WFI()`, so do not assume the
-template and completed examples use the same idle policy.
-
-## 11. Choosing an Example to Extend
-
-Use the nearest architecture, not merely the nearest peripheral:
-
-- simple periodic task -> Example 01;
-- edge-driven input -> Example 02;
-- polling byte stream -> Example 03;
-- interrupt-driven byte stream -> Example 04;
-- hardware waveform -> Example 05;
-- I2C external device -> Example 06;
-- SPI memory/device -> Example 07;
-- high-rate sampled data -> Example 08.
-
-## 12. Rules When Copying Code Between Examples
-
-When reusing code:
-
-1. copy complete module boundaries, not isolated SPL calls;
-2. copy required configuration;
-3. copy the required SPL source entries in `config/modules.mk`;
-4. preserve ISR ownership;
-5. re-check peripheral clock assumptions;
-6. run the layer checker;
-7. re-test electrical wiring.
-
-## 13. Hardware Safety Notes
-
-- Use 3.3 V logic with STM32F103 peripherals.
-- Always share ground between boards/adapters.
-- Use a resistor with external LEDs.
-- Do not intentionally drive PA0 analog input above VDDA or below GND.
-- Verify I2C pull-ups.
-- Do not connect W25Q64 VCC to 5 V.
-- Remember that Example 07 erases the final 4 KiB sector on every reset.
-
-## 14. Detailed Documentation
-
-Each example contains:
-
-```text
-README.md
-docs/architecture.md
-docs/porting_guide.md
-```
-
-Read the README for bring-up, then the architecture document for ownership and
-the porting guide before moving pins/peripherals.
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)

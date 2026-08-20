@@ -1,160 +1,150 @@
-# Architecture — 02-gpio-input-interrupt
+# Architecture — GPIO Input Interrupt — EXTI + Debounce
 
-## 1. Layer Diagram
+> **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `02-gpio-input-interrupt`.
 
-```text
-Application
-    |
-    +--> Button Service
-    |       |
-    |       +--> Board Button
-    |       |       |
-    |       |       +--> GPIO/AFIO/EXTI SPL
-    |       |
-    |       +--> Time Service
-    |               |
-    |               v
-    |          Board Timebase
-    |
-    +--> Indication Service
-            |
-            v
-         Board LED
-```
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-## 2. Ownership
+## Table of contents
 
-| Concern | Owner |
-|---|---|
-| PA0 electrical mode | Board Button |
-| EXTI0 mapping | Board Button |
-| EXTI0 IRQ | Board Button |
-| raw press-edge flag | Board Button |
-| 30 ms debounce | Button Service |
-| debounced press event | Button Service |
-| toggle policy | Application |
-| PC13 polarity | Board LED |
+- [Architectural objective](#architectural-objective)
+- [Layer and source map](#layer-and-source-map)
+- [Composition and initialization](#composition-and-initialization)
+- [Runtime data flow](#runtime-data-flow)
+- [Concurrency contract](#concurrency-contract)
+- [Timing and memory reasoning](#timing-and-memory-reasoning)
+- [Failure and observability](#failure-and-observability)
+- [Extension boundaries](#extension-boundaries)
+- [References](#references)
 
-## 3. Why Debounce Is Not in the ISR
+## Architectural objective
 
-Mechanical bounce can last milliseconds.
+This example is not organized around “one source file per peripheral demo.” It keeps the repository's core rule: **Application expresses policy; lower layers own mechanisms and physical resources**. The concrete subject is active-low button, AFIO/EXTI mapping, minimal ISR publication, deferred 30 ms debounce.
 
-Waiting inside an ISR would:
+The design should remain understandable in both directions:
 
-- block lower-priority interrupts;
-- increase interrupt latency;
-- couple hardware capture with policy;
-- make timing harder to reason about.
+- reading downward explains how a logical request reaches STM32 hardware;
+- reading upward explains how low-level hardware state becomes a bounded, meaningful event/capability for Application.
 
-The ISR records the edge only. Thread mode owns elapsed-time validation.
-
-## 4. EXTI Event Lifecycle
+## Layer and source map
 
 ```text
-physical falling edge
-    |
-EXTI0 pending
-    |
-EXTI0_IRQHandler
-    |
-s_press_edge_pending = true
-    |
-thread takes raw edge
-    |
-30 ms debounce window
-    |
-sample PA0
-    |
-pressed event pending
-    |
-Application takes event
-    |
-toggle indication
+app/src/application.c
+  -> button_service + indication_service
+services/src/button_service.c
+  -> board_button + time_service
+bsp/bluepill/src/board_button.c
+  -> GPIOA + AFIO + EXTI0 + NVIC
+bsp/bluepill/src/board_timebase.c
+  -> SysTick
 ```
 
-## 5. Concurrency Model
+```mermaid
+flowchart TD
+    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
+    SYS --> SVC["services: logical capability"]
+    SYS --> BSP["bsp/bluepill: resource ownership"]
+    APP --> SVC
+    SVC --> BSP
+    SVC --> ECUAL["ecual: off-chip protocol when used"]
+    ECUAL --> BSP
+    BSP --> SPL["SPL/CMSIS"]
+    SPL --> HW["STM32 / external hardware"]
+```
 
-One boolean is shared between ISR and thread mode.
+The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
-The BSP protects the take-and-clear operation using saved PRIMASK state.
+## Composition and initialization
 
-This is enough because:
+The reset path is common to the repository. After `.data/.bss` initialization and `SystemInit()`, `main()` delegates composition to `system_init()`.
 
-- producer is one ISR;
-- consumer is one thread;
-- only one pending edge needs to be retained for the debounce strategy.
-
-If every edge count mattered, a counter/queue would be required.
-
-## 6. Initialization Order
-
-The correct order is:
+For this example the important dependency order is:
 
 ```text
-LED + timebase + button hardware
-    |
-Services
-    |
-Application
+board LED/button/timebase → Time Service → Indication Service → Button Service → Application
 ```
 
-The Button Service requires a working timebase for debounce.
+The order matters because a module should never receive events or invoke a dependency before its state is valid. Peripheral flags are cleared and NVIC lines are configured only after associated storage/state is ready.
 
-## 7. Layer Boundaries
+## Runtime data flow
 
-Application may include:
+```mermaid
+sequenceDiagram
+    participant BTN as PA0 button
+    participant ISR as EXTI0_IRQHandler
+    participant FLAG as Pending-edge flag
+    participant SVC as button_service_process
+    participant APP as application_process
 
-```text
-button_service.h
-indication_service.h
+    BTN->>ISR: falling edge
+    ISR->>FLAG: pending = true
+    ISR->>ISR: clear EXTI0 pending bit
+    SVC->>FLAG: atomic take-and-clear
+    SVC->>SVC: start/restart 30 ms debounce
+    SVC->>BTN: sample pin after window
+    alt still LOW
+        SVC->>APP: publish pressed event
+        APP->>APP: toggle indication
+    else HIGH again
+        SVC->>SVC: reject bounce/transient
+    end
 ```
 
-It must not include:
+Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
-```text
-board_button.h
-stm32f10x_exti.h
-stm32f10x_gpio.h
-```
+## Concurrency contract
 
-## 8. Generic EXTI Abstraction
+SysTick updates time; EXTI0 publishes the raw candidate. PRIMASK protects take-and-clear. Debounce state and logical pressed-event state are owned by thread mode.
 
-This SPL example keeps EXTI configuration directly in the Board Button module
-instead of introducing a separate generic MCAL layer.
+### Key invariants
 
-That is acceptable because SPL itself acts as the low-level peripheral layer.
+- EXTI0 ISR publishes only a raw candidate; it never turns a candidate into a user-level press.
+- `take_press_edge` read/clear is atomic with respect to EXTI because PRIMASK surrounds it.
+- A logical press is published only after the 30 ms window and a fresh physical-pin read.
+- Button polarity/mapping remain below the Service.
 
-If many board inputs require EXTI, a reusable lower-level EXTI wrapper may be
-introduced, but it should remain below Services.
+### Race reasoning
 
-## 9. Failure Propagation
+If a new edge occurs before thread mode takes the boolean, it coalesces. If it occurs while thread mode holds PRIMASK for read/clear, the exception is delayed until interrupts are restored, after which it can set the flag again. This avoids a lost edge specifically at the read/clear boundary, while still intentionally allowing coalescing outside it.
 
-Board initialization functions in this example are mostly void except for the
-timebase. A SysTick configuration failure causes:
+The repository uses `volatile` for state that can change asynchronously, but `volatile` alone is not treated as a lock or a complete synchronization primitive. Where a compound take/clear or block copy must be atomic with respect to an ISR, the code uses a short PRIMASK critical section. Where SPSC ring publication depends on compiler ordering, it uses an explicit compiler barrier.
 
-```text
-board_init() -> false
-system_init() -> false
-system_panic()
-```
+## Timing and memory reasoning
 
-Runtime bounce/noise is handled as a normal event-filtering concern rather than
-a fatal error.
+The project has no heap. Buffers, device state, counters, and Application state are statically or automatically allocated and are therefore visible in the link map.
 
-## 10. Extension Strategy
+Clock-dependent behavior is derived from CMSIS/SPL clock state wherever the example needs exact peripheral timing. The normal board configuration is 72 MHz HCLK, 72 MHz PCLK2, 36 MHz PCLK1, with APB1 timers receiving 72 MHz because their bus prescaler is not 1.
 
-For richer button behavior:
+The most important timing-specific behavior for this example is described in its [README](../README.md); source constants under `config/` are authoritative.
 
-```text
-Board Button
-    |
-raw edge/level
-    |
-Button Service
-    |
-press/release/long/double events
-    |
-Application
-```
+## Failure and observability
 
-Keep the physical pin and EXTI details at the bottom even as the Service grows.
+There is no runtime retry mechanism because GPIO/EXTI have no transactional device fault here. A wrong pin source, polarity, pending-bit sequence, or timebase manifests as missing/repeated press events and should be diagnosed at the BSP boundary.
+
+Initialization failure propagates toward `system_init()` instead of being silently ignored. Runtime diagnostics are deliberately low-overhead: counters, state flags, and GDB-visible globals are preferred to adding a logging subsystem that would change the example's peripheral/concurrency profile.
+
+## Extension boundaries
+
+When extending this example:
+
+1. keep board pin/peripheral mapping in BSP/configuration;
+2. keep external-device command semantics in ECUAL when an off-chip device is involved;
+3. expose a Service capability rather than an SPL type to Application;
+4. keep ISR work bounded and define the publication/ownership rule before writing the handler;
+5. update `config/modules.mk` only with the SPL sources actually required;
+6. run `make check-layers` before accepting the change;
+7. document any new buffer capacity, timeout, drop policy, interrupt priority, or destructive operation.
+
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
+
+
+---
+
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

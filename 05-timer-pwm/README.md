@@ -1,269 +1,172 @@
-# 05-timer-pwm — TIM2 Channel 1 Hardware PWM
+# Timer PWM — TIM2 Channel 1
 
-## 1. Learning Objectives
+> **Scope:** Example 5 of the repository progression — hardware PWM on PA0 with timer-clock derivation, PSC/ARR/CCR math, permille duty API, drift-aware software ramp.
 
-This example separates **waveform generation** from **software scheduling**.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- how TIM2_CH1 produces PWM in hardware;
-- how APB1 timer clock differs from PCLK1;
-- how SPL configures PSC, ARR, and CCR1;
-- how PWM mode 1 and preload work;
-- why duty is expressed as permille at the Service boundary;
-- how SysTick schedules a slow breathing effect without generating PWM edges.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Wiring
+## Purpose and expected behavior
 
-Use an external LED:
+The BSP configures TIM2 so its counter ticks at 1 MHz and wraps every 1000 counts, producing a 1 kHz PWM period. Application changes duty by 10 permille every 10 ms, ramps from 0 to 1000 and back, and delegates compare calculation to the PWM Service.
 
-```text
-PA0 / TIM2_CH1 ---- 330 ohm ---- LED anode
-GND --------------------------- LED cathode
-```
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: hardware PWM on PA0 with timer-clock derivation, PSC/ARR/CCR math, permille duty API, drift-aware software ramp.
 
-The onboard PC13 LED is not connected to a PWM timer channel and is not used by
-this example.
+## Hardware and wiring
 
-## 3. Configuration
-
-`config/board_config.h`:
-
-```c
-#define BOARD_TIMEBASE_HZ       (1000UL)
-#define BOARD_PWM_TIMER_TICK_HZ (1000000UL)
-#define BOARD_PWM_FREQUENCY_HZ  (1000UL)
-```
-
-`config/pwm_config.h`:
-
-```c
-#define PWM_BREATH_UPDATE_PERIOD_MS (10UL)
-#define PWM_BREATH_STEP_PERMILLE    (10U)
-```
-
-Resulting behavior:
+TIM2_CH1 is output on PA0. The documented demo wiring is PA0 through approximately 330 Ω and an LED to GND. SysTick supplies only the slow control timebase; TIM2 generates every PWM edge in hardware.
 
 ```text
-PWM carrier: 1 kHz
-Application update: every 10 ms
-Duty step: 1%
-0 -> 100%: about 1 s
-100 -> 0%: about 1 s
+PA0 / TIM2_CH1 ---- 330 ohm ---- LED ---- GND
 ```
 
-## 4. Clock Calculation
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-TIM2 is connected to APB1.
+## Configuration
 
-The BSP obtains the clock tree with:
+| Constant | Value |
+|---|---:|
+| `BOARD_TIMEBASE_HZ` | 1000 Hz |
+| `BOARD_PWM_TIMER_TICK_HZ` | 1,000,000 Hz |
+| `BOARD_PWM_FREQUENCY_HZ` | 1,000 Hz |
+| `PWM_BREATH_UPDATE_PERIOD_MS` | 10 ms |
+| `PWM_BREATH_STEP_PERMILLE` | 10 (1%) |
+| Duty API range | 0..1000 permille |
 
-```c
-RCC_GetClocksFreq(&clocks);
-```
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-Then:
+## Source ownership
 
 ```text
-timer_clock = PCLK1
+app/src/application.c
+  -> time_service + pwm_service
+services/src/pwm_service.c
+  -> board_pwm duty/count API
+bsp/bluepill/src/board_pwm.c
+  -> RCC clock query + GPIOA + TIM2_CH1
+bsp/bluepill/src/board_timebase.c
+  -> SysTick
 ```
 
-but STM32F1 timers receive twice PCLK when the APB prescaler is not 1.
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
 
-Therefore the code checks `RCC_CFGR_PPRE1` and doubles the timer clock when
-required.
+## Runtime flow
 
-For the common 72 MHz system clock:
+```mermaid
+flowchart TD
+    CLK["Read APB1/TIM2 clock"] --> PSC["Derive divider for 1 MHz counter"]
+    PSC --> ARR["ARR = 999 for 1000-count period"]
+    ARR --> PWM["TIM2 CH1 PWM1 + preload"]
+    PWM --> HW["Hardware emits 1 kHz waveform"]
+    TICK["SysTick millisecond time"] --> APP["Every 10 ms adjust duty by 10 permille"]
+    APP --> CCR["Service rounds permille to compare count"]
+    CCR --> PWM
+```
+
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### APB1 timer clock
+
+TIM2 is on APB1. Under the normal 72 MHz clock tree, PCLK1 is 36 MHz, but STM32F1 timers receive twice PCLK when the APB prescaler is not 1. The BSP explicitly checks that condition and obtains a 72 MHz TIM2 input.
+
+To get a 1 MHz counter tick:
 
 ```text
-PCLK1 = 36 MHz
-TIM2 clock = 72 MHz
+PSC divider = 72 MHz / 1 MHz = 72
+PSC register = 72 - 1 = 71
 ```
 
-Target timer tick:
+For 1 kHz PWM:
 
 ```text
-1 MHz
+period counts = 1,000,000 / 1,000 = 1000
+ARR = 1000 - 1 = 999
 ```
 
-so:
+The code validates divisibility and 16-bit timer-range constraints instead of silently truncating an impossible configuration.
+
+### Duty conversion
+
+The Service accepts 0..1000 permille. Compare is rounded as approximately:
 
 ```text
-prescaler divider = 72
-PSC = 71
+CCR = (duty_permille * period_counts + 500) / 1000
 ```
 
-PWM frequency:
+Allowing compare to equal `period_counts` represents a true 100% logical duty under the chosen PWM configuration. TIM2 output-compare and ARR preload are enabled so register updates take effect coherently.
+
+### Duty-ramp state model
+
+```mermaid
+stateDiagram-v2
+    [*] --> Increasing
+    Increasing --> Increasing: add 10 permille every 10 ms
+    Increasing --> Decreasing: duty reaches 1000 permille
+    Decreasing --> Decreasing: subtract 10 permille every 10 ms
+    Decreasing --> Increasing: duty reaches 0 permille
+```
+
+### Two timescales
+
+The carrier is not software-toggled. Hardware maintains 1 kHz PWM even if the super-loop is late. Thread mode only modifies the slow duty envelope every 10 ms. The application advances `s_last_update_ms += period` rather than assigning `now`, preventing small scheduling delays from accumulating into long-term ramp drift.
+
+## Concurrency and ownership
+
+SysTick is the only software interrupt needed by the demo. PWM waveform timing is an autonomous timer-hardware responsibility. Thread mode owns duty policy and register update requests through the Service.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-1 MHz / 1000 = 1 kHz
+board TIM2 PWM + timebase → Time Service → PWM Service → Application
 ```
 
-so:
+Initialization fails if the runtime timer clock cannot be divided exactly to the configured tick or if the requested period exceeds the supported counter range. There is no runtime waveform-monitor feedback.
 
-```text
-period counts = 1000
-ARR = 999
-```
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-## 5. Duty Representation
-
-The Service/API represents duty in permille:
-
-```text
-0      = 0%
-500    = 50%
-1000   = 100%
-```
-
-This keeps Application independent from timer period counts.
-
-The BSP converts:
-
-```text
-compare_counts =
-    (duty_permille * period_counts + 500) / 1000
-```
-
-The added 500 provides integer rounding.
-
-## 6. Timer Configuration Sequence
-
-`board_pwm_init()`:
-
-1. enables GPIOA and TIM2 clocks;
-2. configures PA0 as alternate-function push-pull;
-3. calculates timer input clock;
-4. calculates PSC;
-5. calculates ARR;
-6. configures TIM2 up-counting;
-7. configures Channel 1 as PWM mode 1;
-8. enables channel output;
-9. enables CCR1 preload;
-10. enables ARR preload;
-11. initializes compare to zero;
-12. starts TIM2.
-
-SPL calls include:
-
-```text
-TIM_TimeBaseInit
-TIM_OC1Init
-TIM_OC1PreloadConfig
-TIM_ARRPreloadConfig
-TIM_SetCompare1
-TIM_Cmd
-```
-
-## 7. Preload
-
-Preload prevents duty/period changes from taking effect at arbitrary points
-inside the current PWM cycle.
-
-With preload enabled, new values are transferred at the timer update boundary.
-
-This produces cleaner PWM updates and avoids a malformed partial pulse when the
-Application changes duty.
-
-## 8. Application Fade Algorithm
-
-Application state:
-
-```text
-current duty
-increasing/decreasing direction
-last update timestamp
-```
-
-Every 10 ms:
-
-```text
-increasing?
-    |
-    +--> duty += 10 permille
-    |
-    +--> hit 1000 -> reverse
-
-decreasing?
-    |
-    +--> duty -= 10 permille
-    |
-    +--> hit 0 -> reverse
-```
-
-The resulting brightness envelope is triangular.
-
-## 9. Scheduling
-
-SysTick provides a 1 ms scheduling timebase.
-
-The Application does not use delays.
-
-It advances:
-
-```c
-s_last_update_ms += PWM_BREATH_UPDATE_PERIOD_MS;
-```
-
-rather than assigning the current time. This reduces long-term phase drift from
-small super-loop scheduling delays.
-
-TIM2 hardware continues generating PWM between Application updates.
-
-## 10. Architecture
-
-```text
-Application
-    |
-    +--> PWM Service ------> Board PWM ------> TIM2/GPIO SPL
-    |
-    +--> Time Service -----> Board Timebase -> SysTick/CMSIS
-```
-
-The Application specifies desired duty and update timing only.
-
-## 11. Interrupts
-
-TIM2 interrupts are not used.
-
-PWM generation is entirely hardware-driven.
-
-The only interrupt required by this example is SysTick for the millisecond
-timebase.
-
-## 12. Debug Symbols
-
-Useful state:
-
-```gdb
-p s_duty_permille
-p s_increasing
-p s_last_update_ms
-p s_pwm_period_counts
-```
-
-Breakpoints:
-
-```gdb
-break board_pwm_set_duty_permille
-break application_process
-```
-
-## 13. Idle Behavior
-
-`system_idle()` uses `__NOP()`.
-
-The CPU remains available for SWD debugging while TIM2 keeps generating PWM
-independently.
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -273,66 +176,35 @@ make debug-server
 make debug
 ```
 
-## 14. Test with an Oscilloscope or Logic Analyzer
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-Probe PA0.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-Expected:
+## Design decisions and limitations
 
-```text
-frequency: about 1 kHz
-period: about 1 ms
-duty: slowly changes 0% -> 100% -> 0%
-```
+- Exact-divisibility checks favor predictable math over accepting approximate timer rates.
+- Permille is a simple integer API that avoids floating point and exposes 0.1% units even though actual timer resolution is 1/1000 here.
+- The visual “breathing” is a linear duty ramp, not perceptual gamma correction.
 
-A logic analyzer is useful for frequency/duty. An oscilloscope better shows the
-analog brightness-related average behavior.
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-## 15. Troubleshooting
+## Porting boundary
 
-### No Waveform
+When changing timer/channel, recompute actual timer input from the bus prescaler rules, verify AF pin mapping/remap, timer width, PWM mode/polarity, and preload behavior. Do not copy PSC/ARR values across clock trees.
 
-Check:
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-- PA0 wiring;
-- GPIOA clock;
-- TIM2 clock;
-- alternate-function mode;
-- timer enabled;
-- Channel 1 output enabled.
+## References
 
-### Frequency Is Off by a Factor of Two
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-This strongly suggests the APB1 timer x2 rule was handled incorrectly.
 
-Verify PPRE1 and actual TIM2 input clock.
+---
 
-### Duty Does Not Change
-
-Check:
-
-- Application reaches periodic update;
-- SysTick increments;
-- `pwm_service_set_duty_permille()` is called;
-- CCR1 changes.
-
-### LED Is Dim or Fade Is Hard to See
-
-Check LED orientation and resistor value.
-
-Human brightness perception is nonlinear, so a linear duty ramp is not a
-perceptually linear brightness ramp.
-
-## 16. Extension Exercises
-
-1. Add gamma-corrected brightness.
-2. Change PWM carrier frequency.
-3. Use another timer channel.
-4. Drive RGB channels with three PWM outputs.
-5. Replace triangular breathing with sine-table duty.
-6. Use a timer interrupt instead of SysTick for the slow update scheduler.
-
-## 17. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

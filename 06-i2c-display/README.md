@@ -1,349 +1,166 @@
-# 06-i2c-display — I2C1 + SSD1306 OLED 128x64
+# I2C Display — SSD1306
 
-## 1. Learning Objectives
+> **Scope:** Example 6 of the repository progression — I2C1 bounded polling, SSD1306 ECUAL protocol, 128×64 static framebuffer, periodic presentation.
 
-This example introduces an external device with a dedicated ECUAL driver.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- I2C1 on PB6/PB7;
-- alternate-function open-drain GPIO;
-- bounded SPL I2C polling;
-- SSD1306 command vs data control bytes;
-- display power-on sequencing;
-- framebuffer ownership;
-- simple 5x7 text rendering;
-- progress-bar rendering;
-- separation between Application, Service, ECUAL, and board bus.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Hardware and Wiring
+## Purpose and expected behavior
 
-Connect a four-pin SSD1306-compatible I2C module:
+Board initialization establishes the timebase before I2C because both transaction timeouts and power-on delay need millisecond time. The ECUAL driver initializes the SSD1306, maintains a static 1024-byte page-layout framebuffer, renders a small glyph set and progress bar, and transfers the complete buffer on each presentation. Application updates uptime/progress every 100 ms; if a presentation fails, it marks the display non-operational and stops further refresh attempts.
 
-```text
-Blue Pill      OLED
--------------------
-GND        --> GND
-3.3V       --> VCC
-PB6        --> SCL
-PB7        --> SDA
-```
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: I2C1 bounded polling, SSD1306 ECUAL protocol, 128×64 static framebuffer, periodic presentation.
 
-Default 7-bit address:
+## Hardware and wiring
+
+I2C1 uses PB6 SCL and PB7 SDA in alternate-function open-drain mode. The target is a 128×64 SSD1306-compatible OLED at default 7-bit address 0x3C. The bus requires pull-up resistors; many modules already include them.
 
 ```text
-0x3C
+Blue Pill          SSD1306 module
+-------------------------------
+3.3 V      ------> VCC
+GND        ------> GND
+PB6/I2C1   ------> SCL
+PB7/I2C1   <-----> SDA
 ```
 
-Some modules use `0x3D`.
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-I2C requires pull-ups to 3.3 V. Many modules already include them.
+## Configuration
 
-## 3. Expected Display
+| Constant | Value |
+|---|---:|
+| I2C address | `0x3C` (7-bit) |
+| I2C clock | 400 kHz |
+| per-wait timeout | 20 ms |
+| display power-on delay | 100 ms |
+| SysTick | 1 kHz |
+| UI update period | 100 ms |
+| progress step | 2% |
+| framebuffer | 128 × 64 / 8 = 1024 bytes |
 
-The demo renders:
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
+
+## Source ownership
 
 ```text
-STM32F103
-I2C SSD1306
-
-UPTIME <seconds>
-SECONDS
-
-[progress bar]
+app/src/application.c
+  -> display_service + time_service
+services/src/display_service.c
+  -> ssd1306 ECUAL
+ecual/src/ssd1306.c
+  -> board_display_bus
+bsp/bluepill/src/board_display_bus.c
+  -> I2C1 PB6/PB7 + bounded waits
 ```
 
-The progress bar repeatedly fills and empties.
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
 
-The frame is refreshed every 100 ms.
+## Runtime flow
 
-## 4. Compile-Time Configuration
-
-```c
-#define BOARD_TIMEBASE_HZ                (1000UL)
-#define BOARD_DISPLAY_I2C_ADDRESS_7BIT   (0x3CU)
-#define BOARD_DISPLAY_I2C_CLOCK_HZ       (400000UL)
-#define BOARD_DISPLAY_I2C_TIMEOUT_MS     (20UL)
-#define BOARD_DISPLAY_POWER_ON_DELAY_MS  (100UL)
-
-#define DISPLAY_DEMO_UPDATE_PERIOD_MS    (100UL)
-#define DISPLAY_DEMO_PROGRESS_STEP       (2U)
+```mermaid
+flowchart TD
+    TIME["Start 1 kHz timebase"] --> I2C["Configure I2C1 400 kHz"]
+    I2C --> DELAY["Wait 100 ms display power-on"]
+    DELAY --> INIT["SSD1306 initialization command sequence"]
+    INIT --> FB["Render into 1024-byte framebuffer"]
+    FB --> PRESENT["Send control byte 0x40 + framebuffer"]
+    PRESENT --> OK{"Transfer succeeds?"}
+    OK -- "yes" --> WAIT["Wait until next 100 ms update"]
+    WAIT --> FB
+    OK -- "no" --> STOP["Mark display non-operational"]
 ```
 
-## 5. Pin Configuration
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
 
-PB6 and PB7 are configured as alternate-function open-drain outputs:
+## Mechanism in depth
+
+### I2C transaction boundary
+
+The BSP waits for bus idle, generates START, waits for master mode, transmits the 7-bit write address, sends one SSD1306 control byte, streams payload bytes, waits for byte-transmitted state, and generates STOP. Command transfers use control `0x00`; display-data transfers use `0x40`.
+
+### Bounded polling semantics
+
+Every hardware wait is bounded by `BOARD_DISPLAY_I2C_TIMEOUT_MS` and checks I2C error conditions such as bus error, arbitration loss, acknowledge failure, overrun, and timeout. The timeout deadline is restarted for each expected state transition, so **20 ms is not a cap on the full 1024-byte frame**; it is a cap on an individual wait for the peripheral to advance.
+
+On failure the BSP generates STOP and clears relevant error state. There is no GPIO-level bus recovery that manually clocks SCL when a slave holds SDA low indefinitely; a permanently BUSY/stuck electrical bus therefore remains a documented limitation.
+
+### ECUAL ownership
+
+`ssd1306.c` owns device commands, addressing mode, framebuffer format, glyph drawing, and progress-bar rasterization. It does not own PB6/PB7 or STM32 I2C registers. The Board display-bus API is the seam between a reusable device protocol and a board-specific transport.
+
+### Display-operational state
+
+```mermaid
+stateDiagram-v2
+    [*] --> Initializing
+    Initializing --> Operational: initial present succeeds
+    Initializing --> Failed: initial present fails
+    Operational --> Operational: periodic present succeeds
+    Operational --> Failed: present fails
+    Failed --> Failed: refresh is no longer attempted
+```
+
+### Static rendering model
+
+The 128×64 monochrome panel requires 1024 bytes for one full frame. The driver uses page-organized pixels, a compact 5×7 glyph representation with 6-pixel advance, and a restricted character set sufficient for the demo (`space`, punctuation used by the UI, digits, and `A-Z`). The application includes a small unsigned-integer formatter instead of pulling in `printf`.
+
+## Concurrency and ownership
+
+SysTick advances time while the main loop performs display transactions. I2C itself is polling/synchronous and has no IRQ/DMA in this example. Transactions are bounded, but a full frame is still a relatively long cooperative operation compared with the earlier examples.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-PB6 -> I2C1_SCL
-PB7 -> I2C1_SDA
+board timebase + I2C1 → Time Service → SSD1306/Display Service → Application initial render
 ```
 
-Open-drain is required because I2C devices only actively pull the bus low.
+Initialization propagates display/bus failure to `system_init()` and panic. After a successful start, a failed `display_service_present()` latches `s_display_operational=false`; the application does not repeatedly hammer a failing bus.
 
-The pull-up resistors define the HIGH level.
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-## 6. I2C Clock — Normal 72 MHz System Clock
-
-I2C1 is on APB1.
-
-The SPL `I2C_Init()` routine receives:
-
-```text
-I2C_ClockSpeed = 400000
-```
-
-and configures the peripheral timing from the APB1 clock.
-
-For a typical 72 MHz system configuration:
-
-```text
-PCLK1 = 36 MHz
-requested I2C = 400 kHz
-```
-
-Do not hard-code CCR values in Application.
-
-## 7. Clock Changes
-
-If the system/APB1 clock changes, the I2C timing must still be derived from the
-actual peripheral clock.
-
-SPL performs the register calculation, but the BSP remains responsible for
-initializing I2C after the clock tree is valid.
-
-Always verify SCL frequency with a logic analyzer after clock-tree changes.
-
-## 8. I2C Initialization Sequence
-
-`board_display_bus_init()`:
-
-1. enables GPIOB and I2C1 clocks;
-2. configures PB6/PB7 as AF open-drain;
-3. deinitializes I2C1;
-4. configures clock speed and standard I2C parameters;
-5. enables I2C1;
-6. clears stale error flags;
-7. waits for BUSY to clear.
-
-The board timebase is initialized before the display bus because polling
-timeouts depend on milliseconds.
-
-## 9. Write Transaction
-
-The board bus performs a bounded write transaction.
-
-Conceptually:
-
-```text
-wait BUSY clear
-    |
-START
-    |
-wait master mode
-    |
-send 7-bit address + write
-    |
-wait transmitter mode
-    |
-send SSD1306 control byte
-    |
-send payload bytes
-    |
-wait final byte transmitted
-    |
-STOP
-```
-
-Timeouts prevent an unbounded I2C wait.
-
-## 10. SSD1306 Control Bytes
-
-The board bus prepends:
-
-```text
-0x00 -> command stream
-0x40 -> display RAM data stream
-```
-
-The ECUAL driver chooses whether a transfer is commands or data.
-
-## 11. ECUAL Transport Design
-
-Dependency:
-
-```text
-SSD1306 ECUAL
-    |
-Board Display Bus
-    |
-I2C1 SPL
-```
-
-The SSD1306 driver does not know PB6/PB7.
-
-It calls:
-
-```c
-board_display_bus_write(data_mode, bytes, length);
-```
-
-This keeps the display protocol separate from MCU wiring.
-
-## 12. Power-On Delay
-
-Four-pin modules often do not expose the SSD1306 RESET pin.
-
-The driver therefore waits:
-
-```text
-100 ms
-```
-
-before sending initialization commands.
-
-The delay uses the board timebase rather than an arbitrary empty loop.
-
-## 13. SSD1306 Initialization
-
-The driver sends a command sequence that configures:
-
-- display off during setup;
-- clock/oscillator;
-- 64-row multiplex;
-- display offset/start line;
-- charge pump;
-- horizontal addressing;
-- segment remap;
-- COM scan direction;
-- COM pin configuration;
-- contrast;
-- pre-charge;
-- VCOMH;
-- normal display mode;
-- scroll off;
-- display on.
-
-After initialization, the framebuffer is cleared and presented.
-
-## 14. Framebuffer Layout
-
-Display size:
-
-```text
-128 x 64 pixels
-```
-
-Pages:
-
-```text
-64 / 8 = 8 pages
-```
-
-Framebuffer:
-
-```text
-128 * 8 = 1024 bytes
-```
-
-Pixel index:
-
-```text
-index = x + (y / 8) * 128
-mask  = 1 << (y % 8)
-```
-
-The framebuffer is statically allocated.
-
-## 15. Text Renderer
-
-The ECUAL contains a compact 5x7 font.
-
-Glyph properties:
-
-```text
-width: 5 pixels
-height: 7 pixels
-advance: 6 pixels
-```
-
-Unknown characters fall back to the space glyph.
-
-The renderer clips when the next character would exceed the display bounds.
-
-## 16. Progress Bar
-
-The progress-bar function:
-
-1. draws a rectangular border;
-2. clamps percent to 100;
-3. calculates interior fill width;
-4. writes filled/unfilled pixels.
-
-Application only passes logical geometry and percentage.
-
-## 17. Display Update
-
-`ssd1306_update()` sends:
-
-```text
-column address: 0..127
-page address:   0..7
-```
-
-then transmits the entire 1024-byte framebuffer.
-
-This is simple and deterministic, though not bandwidth-optimal.
-
-## 18. Error Handling
-
-The board bus checks/clears I2C errors such as:
-
-```text
-BERR
-ARLO
-AF
-OVR
-TIMEOUT
-```
-
-Initialization or update returns `false` on failure.
-
-If a runtime `display_service_present()` fails, the Application marks the
-display non-operational and stops attempting further updates.
-
-## 19. Interrupt Policy
-
-I2C interrupts are not used.
-
-The bus is synchronous/polling with explicit timeouts.
-
-SysTick provides the millisecond timebase.
-
-## 20. Architecture
-
-```text
-Application
-    |
-Display Service
-    |
-SSD1306 ECUAL
-    |
-Board Display Bus
-    |
-I2C/GPIO/RCC SPL
-```
-
-Time Service/Board Timebase provide scheduling and timeout support.
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -353,73 +170,37 @@ make debug-server
 make debug
 ```
 
-## 21. Test Procedure
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-1. Verify 3.3 V/GND.
-2. Verify PB6=SCL, PB7=SDA.
-3. Confirm pull-ups exist.
-4. Flash firmware.
-5. Verify text appears.
-6. Verify uptime increments.
-7. Verify progress bar moves.
-8. If available, measure SCL near 400 kHz.
-9. Reset several times and verify reliable initialization.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-## 22. Troubleshooting
+## Design decisions and limitations
 
-### OLED Is Completely Black
+- Full-frame refresh simplifies ownership and rendering at the cost of I2C bandwidth.
+- Polling keeps the bus state machine readable but occupies thread mode during a frame transfer.
+- No bus-unwedge routine exists for a slave that physically holds SDA low.
+- The glyph set is intentionally limited rather than a general font engine.
 
-Check:
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-- power;
-- common ground;
-- SCL/SDA wiring;
-- address 0x3C vs 0x3D;
-- pull-ups;
-- initialization return value.
+## Porting boundary
 
-### I2C BUSY Never Clears
+Porting separates into two cases: changing only MCU pins/I2C instance should affect BSP; changing the display controller/address/geometry affects ECUAL and configuration. Verify pull-ups, voltage, bus capacitance, I2C rise time, and actual controller compatibility before assuming 400 kHz operation.
 
-Possible causes:
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-- SDA stuck low;
-- SCL stuck low;
-- wrong wiring;
-- device held/reset improperly;
-- previous interrupted transaction.
+## References
 
-Inspect both lines with a meter or logic analyzer.
+- [Solomon Systech — SSD1306 product information](https://www.solomon-systech.com/en/product/SSD1306)
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-### Text Is Shifted or Inverted
 
-Check SSD1306 variant/orientation assumptions:
+---
 
-- segment remap;
-- COM scan direction;
-- display geometry;
-- controller compatibility.
-
-### Update Error After Running
-
-Inspect:
-
-- I2C error flags;
-- supply stability;
-- pull-up strength;
-- bus capacitance;
-- update return value.
-
-## 23. Extension Exercises
-
-1. Add lowercase glyphs.
-2. Add partial-page updates.
-3. Add bitmap drawing.
-4. Add a display reset GPIO.
-5. Add an I2C address scan tool.
-6. Add an asynchronous display-update Service.
-7. Support another OLED controller.
-
-## 24. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

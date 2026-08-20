@@ -1,88 +1,121 @@
-# Porting Guide — 03-uart-polling
+# Porting Guide — UART Polling — Non-Blocking USART1
 
-## 1. Changing Pins While Keeping USART1
+> **Scope:** What must be re-validated when `03-uart-polling` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-STM32F1 alternate-function mapping may require AFIO remap support if you move
-away from the default PA9/PA10 mapping.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-Update BSP only.
+## Table of contents
 
-Application and UART Service should remain unchanged.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-## 2. Moving to USART2/USART3
+## Porting principle
 
-Update:
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-- peripheral instance;
-- RCC bus/clock;
-- TX/RX pins;
-- GPIO port;
-- any remap configuration.
+For this example, the stable logical behavior is: USART1 115200 8N1 with `try_read`/`try_write`, no IRQ/DMA, one-byte pending echo state.
 
-Remember USART1 is on APB2, while USART2/USART3 are on APB1.
+## Change matrix
 
-## 3. Changing Baud Rate
+| Change | Primary review |
+|---|---|
+| UART instance | APB bus/clock, enable/reset, status/data registers |
+| TX/RX pins | AF mapping/remap and electrical mode |
+| baud | actual peripheral clock and error |
+| higher throughput | replace BSP implementation with IRQ/DMA buffering while preserving Service API where possible |
 
-Update:
+## Same MCU, different board
 
-```c
-#define BOARD_UART_BAUD_RATE (...)
-```
+When changing UART instance/pins, verify APB bus, AF pin modes/remap, peripheral clock, baud error, and voltage levels. If moving to interrupt/DMA operation, the public Service can remain non-blocking while the BSP implementation gains buffering.
 
-SPL recalculates the peripheral baud configuration.
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Verify with a terminal or logic analyzer.
+## Clock and timing re-validation
 
-## 4. Changing the Clock Tree
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-Re-check the peripheral clock seen by the selected USART.
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-Do not assume baud remains correct after changing system/APB clocks.
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-## 5. Changing Data Format
+## Interrupt and concurrency re-validation
 
-Modify BSP `USART_InitTypeDef`:
-
-- word length;
-- parity;
-- stop bits;
-- hardware flow control.
-
-Document matching terminal settings.
-
-## 6. Adding a Blocking API with Timeout
-
-If a blocking helper is required, keep it below Application and make the wait
-bounded.
-
-Prefer preserving the non-blocking API for normal super-loop use.
-
-## 7. Porting to Another MCU Family
-
-Keep:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-Application -> UART Service
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-Replace the Board UART implementation and vendor peripheral layer.
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-## 8. Post-Port Tests
+This example is intentionally thread-only for USART. The super-loop is the sole reader/writer; there is no shared UART state with an ISR. That makes it a baseline for understanding why the ownership model changes in Example 04.
 
--  TX idle level correct.
--  greeting readable.
--  exact 115200 baud verified.
--  RX path works.
--  echo works.
--  no blocking wait was accidentally introduced.
--  layer checker passes.
+## Moving across STM32F1 or MCU families
 
-## 9. Common Pitfalls
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
 
-- TX connected to TX instead of adapter RX;
-- no common ground;
-- 5 V adapter logic;
-- wrong APB clock assumption;
-- forgetting AF remap;
-- changing USART but not GPIO/RCC mapping;
-- turning `try_write` into an unbounded wait.
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
+
+## Validation sequence
+
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
+```
+
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
+
+## Failure signatures
+
+Useful porting clues:
+
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
+
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
+
+
+---
+
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

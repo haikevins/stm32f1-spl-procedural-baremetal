@@ -1,131 +1,121 @@
-# Porting Guide — 01-blink-led
+# Porting Guide — Blink LED — GPIO Output + SysTick
 
-## 1. Porting Goal
+> **Scope:** What must be re-validated when `01-blink-led` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-A successful port should preserve:
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-```text
-Application -> Time Service / Indication Service
-```
+## Table of contents
 
-while replacing only the hardware-specific implementation required by the new
-board or MCU.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-## 2. Porting to Another Blue Pill with the Same STM32F103
+## Porting principle
 
-Normally no source changes are required if:
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-- the onboard LED is still PC13;
-- the system clock setup is compatible;
-- SWD/OpenOCD settings are unchanged.
+For this example, the stable logical behavior is: GPIO output, active-low board resource, SysTick timebase, non-blocking periodic scheduling.
 
-Build and hardware-test before assuming board clones are electrically
-identical.
+## Change matrix
 
-## 3. Moving the LED to Another Pin
+| Change | Primary review |
+|---|---|
+| LED pin/polarity | `bsp/bluepill/board_led.*`, `board_pins.h` |
+| tick rate | `board_config.h`, SysTick reload and Service assumptions |
+| clock source | build `HSE_VALUE`, vendor SystemInit, `SystemCoreClock` |
+| low-power idle | `system_control.c` plus race-free wake policy |
 
-Update BSP pin definitions and GPIO clock.
+## Same MCU, different board
 
-Verify:
+The most important porting boundaries are LED pin/polarity, clock source, `SystemCoreClock`, and SysTick frequency. If only the board LED changes, Application and Services should remain unchanged.
 
-- new GPIO port;
-- new pin;
-- RCC peripheral clock;
-- output mode;
-- active-low/active-high behavior.
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Application and Indication Service should remain unchanged.
+## Clock and timing re-validation
 
-## 4. Changing the System Clock
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-Verify:
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-- `SystemInit()`;
-- `SystemCoreClockUpdate()`;
-- HSE definition;
-- clock tree.
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-The SysTick reload is derived from `SystemCoreClock`, so do not hard-code a new
-reload in Application.
+## Interrupt and concurrency re-validation
 
-## 5. Changing the Timebase Frequency
-
-If the Time Service still claims millisecond units, keep the physical timebase
-at 1 kHz.
-
-If you change the physical tick frequency, either:
-
-- convert ticks to milliseconds in the BSP/Service, or
-- change the API semantics and every consumer consistently.
-
-## 6. Using a Timer Instead of SysTick
-
-Replace only the Board Timebase implementation.
-
-The Service can keep:
-
-```c
-uint32_t time_service_get_ms(void);
-```
-
-The Application should not care whether time comes from SysTick, TIM2, or
-another timer.
-
-## 7. Porting to Another STM32F1 MCU
-
-Review:
-
-- startup vector table;
-- linker memory;
-- system clock code;
-- GPIO availability;
-- SPL density/device defines;
-- SysTick/CMSIS compatibility.
-
-## 8. Porting to Another MCU Family
-
-Keep Application and Service APIs if possible.
-
-Replace:
-
-- BSP;
-- vendor peripheral layer;
-- startup;
-- linker;
-- clock implementation;
-- debug target configuration.
-
-## 9. Validation Checklist
-
--  `make check-layers` passes.
--  reset reaches `main()`.
--  timebase increments at 1 ms.
--  logical LED OFF is correct at startup.
--  LED toggles every 500 ms.
--  one full blink period is about one second.
--  GDB can attach reliably.
-
-## 10. Common Mistakes
-
-- forgetting active-low polarity;
-- enabling the wrong GPIO clock;
-- assuming `SystemCoreClock` is correct without updating it;
-- changing the tick frequency but keeping millisecond names;
-- moving hardware calls into Application;
-- using a blocking delay to preserve blink behavior.
-
-## 11. Target State After Porting
-
-The desired final dependency still looks like:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-Application
-    |
-Services
-    |
-new BSP
-    |
-new low-level peripheral implementation
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-Only hardware-specific layers should know the new pin or MCU.
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
+
+Only SysTick is asynchronous. The ISR owns the time counter; thread mode reads it and executes all LED policy. No GPIO action is required in interrupt context.
+
+## Moving across STM32F1 or MCU families
+
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
+
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
+
+## Validation sequence
+
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
+```
+
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
+
+## Failure signatures
+
+Useful porting clues:
+
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
+
+## References
+
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
+
+
+---
+
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

@@ -1,153 +1,121 @@
-# Porting Guide — 04-uart-interrupt-ring-buffer
+# Porting Guide — UART Interrupt + Ring Buffer
 
-## 1. Parts That Can Remain Unchanged
+> **Scope:** What must be re-validated when `04-uart-interrupt-ring-buffer` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-When only the physical UART changes, these parts can normally remain:
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-```text
-app/
-services/
-common/byte_ring_buffer
-```
+## Table of contents
 
-Keep the same logical contract:
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-```text
-try_read
-try_write
-can_read
-can_write
-```
+## Porting principle
 
-Replace only the Board UART implementation and configuration.
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-## 2. Changing the USART Instance
+For this example, the stable logical behavior is: USART1 asynchronous RX/TX using two SPSC rings, error accounting, TXE interrupt gating, bounded application work.
 
-Moving from USART1 to USART2/USART3 requires review of:
+## Change matrix
 
-- peripheral instance;
-- RCC bus/clock;
-- GPIO pins;
-- alternate-function/remap;
-- IRQ number;
-- strong handler name.
+| Change | Primary review |
+|---|---|
+| ring size | static RAM cost, usable capacity = N-1, overflow behavior |
+| UART/IRQ | handler vector, priority, clear sequences |
+| producer count | SPSC assumptions; redesign synchronization if >1 producer/consumer |
+| sleep | connect pending-work test to a race-free WFI policy rather than blindly sleeping |
 
-Remember USART1 is on APB2 while USART2/USART3 are on APB1.
+## Same MCU, different board
 
-## 3. Changing Buffer Size
+Porting must preserve the interrupt source semantics, handler name, priority, and SPSC ownership. Ring sizes can change, but memory cost and overflow behavior should be measured. A DMA-based UART would change the lower-layer handoff while higher Service semantics could remain non-blocking.
 
-Update:
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-```c
-BOARD_UART_RX_BUFFER_SIZE
-BOARD_UART_TX_BUFFER_SIZE
-```
+## Clock and timing re-validation
 
-The ring reserves one slot, so usable capacity is:
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-```text
-N - 1
-```
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-Check total SRAM usage after increasing buffers.
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-## 4. Changing IRQ Priority
+## Interrupt and concurrency re-validation
 
-Review the priority relative to:
-
-- SysTick;
-- DMA;
-- EXTI;
-- other communication peripherals.
-
-Priority does not justify a long ISR. Keep byte movement bounded.
-
-## 5. Changing Baud/Data Format
-
-Update:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-baud
-word length
-parity
-stop bits
-flow control
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-in the BSP USART configuration.
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-Verify the host terminal uses matching settings.
+This is the first example with continuous bidirectional ISR/thread shared data. Correctness depends on single-producer/single-consumer ownership, volatile index observation, compiler barriers, and never allowing a second producer/consumer to mutate a ring.
 
-## 6. Changing TX/RX Pins
+## Moving across STM32F1 or MCU families
 
-Update BSP pin mapping.
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
 
-If alternate-function remap is required, configure AFIO.
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
 
-Do not expose pin changes to UART Service/Application.
+## Validation sequence
 
-## 7. Porting to DMA UART
+Bring up from the bottom upward:
 
-Preserve the upper API if possible:
-
-```text
-Application -> UART Service
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
 ```
 
-Replace the Board UART data movement with DMA/ring/block logic.
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
 
-Define clearly:
+## Failure signatures
 
-- DMA channel ownership;
-- TX completion semantics;
-- RX circular-buffer handoff;
-- overflow policy.
+Useful porting clues:
 
-## 8. Concurrency Validation
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
 
-Verify the single-producer/single-consumer contract:
+## References
 
-RX:
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-```text
-ISR/DMA producer
-thread consumer
-```
 
-TX:
+---
 
-```text
-thread producer
-ISR/DMA consumer
-```
-
-Do not add a second producer without redesigning synchronization.
-
-Stress-test ring wraparound and temporary thread stalls.
-
-## 9. Symbol Validation
-
-After porting, verify the intended strong handler is linked.
-
-Examples:
-
-```text
-USART2_IRQHandler
-USART3_IRQHandler
-```
-
-The old `USART1_IRQHandler` should no longer be the active owner if USART1 is
-not used.
-
-Use the ELF/map/symbol table as needed.
-
-## 10. Common Pitfalls
-
-- changing USART instance but not IRQ handler name;
-- wrong APB clock assumption;
-- forgetting AFIO remap;
-- ring storage size interpreted as usable capacity;
-- leaving TXE interrupt permanently enabled;
-- two producers modifying one ring;
-- losing bytes without an overflow counter;
-- moving protocol parsing into the ISR.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

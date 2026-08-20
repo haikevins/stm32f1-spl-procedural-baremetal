@@ -1,180 +1,142 @@
-# Architecture — 01-blink-led
+# Architecture — Blink LED — GPIO Output + SysTick
 
-## 1. Dependency Graph
+> **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `01-blink-led`.
 
-```text
-Application
-    |
-    +--> Time Service
-    |       |
-    |       v
-    |   Board Timebase
-    |       |
-    |       v
-    |    CMSIS SysTick
-    |
-    +--> Indication Service
-            |
-            v
-         Board LED
-            |
-            v
-         GPIO/RCC SPL
-```
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-## 2. Layer Responsibilities
+## Table of contents
 
-**Application**
+- [Architectural objective](#architectural-objective)
+- [Layer and source map](#layer-and-source-map)
+- [Composition and initialization](#composition-and-initialization)
+- [Runtime data flow](#runtime-data-flow)
+- [Concurrency contract](#concurrency-contract)
+- [Timing and memory reasoning](#timing-and-memory-reasoning)
+- [Failure and observability](#failure-and-observability)
+- [Extension boundaries](#extension-boundaries)
+- [References](#references)
 
-Owns the 500 ms blink policy.
+## Architectural objective
 
-**Time Service**
+This example is not organized around “one source file per peripheral demo.” It keeps the repository's core rule: **Application expresses policy; lower layers own mechanisms and physical resources**. The concrete subject is GPIO output, active-low board resource, SysTick timebase, non-blocking periodic scheduling.
 
-Exposes millisecond timing.
+The design should remain understandable in both directions:
 
-**Indication Service**
+- reading downward explains how a logical request reaches STM32 hardware;
+- reading upward explains how low-level hardware state becomes a bounded, meaningful event/capability for Application.
 
-Exposes logical indication operations.
-
-**Board Timebase**
-
-Owns SysTick configuration and `SysTick_Handler()`.
-
-**Board LED**
-
-Owns PC13, GPIOC clock, output mode, and active-low translation.
-
-**System**
-
-Owns initialization order.
-
-## 3. Initialization Dependency
-
-The board must be initialized before Services.
+## Layer and source map
 
 ```text
-System clock information
-    |
-Board LED + Board Timebase
-    |
-Time/Indication Services
-    |
-Application
+app/src/application.c
+  -> time_service + indication_service
+services/src/time_service.c
+  -> board_timebase
+services/src/indication_service.c
+  -> board_led
+bsp/bluepill/src/board_timebase.c
+  -> SysTick / CMSIS
+bsp/bluepill/src/board_led.c
+  -> GPIOC / SPL
 ```
 
-The Application timestamp is initialized only after the timebase exists.
+```mermaid
+flowchart TD
+    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
+    SYS --> SVC["services: logical capability"]
+    SYS --> BSP["bsp/bluepill: resource ownership"]
+    APP --> SVC
+    SVC --> BSP
+    SVC --> ECUAL["ecual: off-chip protocol when used"]
+    ECUAL --> BSP
+    BSP --> SPL["SPL/CMSIS"]
+    SPL --> HW["STM32 / external hardware"]
+```
 
-## 4. Runtime Data Flow
+The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
-### Time Path
+## Composition and initialization
+
+The reset path is common to the repository. After `.data/.bss` initialization and `SystemInit()`, `main()` delegates composition to `system_init()`.
+
+For this example the important dependency order is:
 
 ```text
-SysTick interrupt
-    |
-s_time_ms++
-    |
-Time Service
-    |
-Application periodic check
+board GPIO/timebase → Time Service → Indication Service → Application
 ```
 
-### LED Path
+The order matters because a module should never receive events or invoke a dependency before its state is valid. Peripheral flags are cleared and NVIC lines are configured only after associated storage/state is ready.
 
-```text
-Application
-    |
-Indication Service
-    |
-Board LED
-    |
-GPIO SPL
-    |
-PC13
+## Runtime data flow
+
+```mermaid
+flowchart TD
+    RESET["Reset and system_init"] --> LED["Initialize PC13 inactive"]
+    LED --> TICK["Configure SysTick at 1 kHz"]
+    TICK --> APP["application_init stores current ms"]
+    APP --> LOOP["application_process"]
+    LOOP --> DUE{"500 ms elapsed?"}
+    DUE -- "no" --> LOOP
+    DUE -- "yes" --> TOGGLE["Toggle logical status indication"]
+    TOGGLE --> LOOP
 ```
 
-## 5. Peripheral Ownership
+Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
-Only the BSP owns physical peripheral configuration.
+## Concurrency contract
 
-Application does not know:
+Only SysTick is asynchronous. The ISR owns the time counter; thread mode reads it and executes all LED policy. No GPIO action is required in interrupt context.
 
-- GPIOC;
-- PC13;
-- RCC clock bit;
-- output speed;
-- active-low polarity.
+### Key invariants
 
-This is the main separation demonstrated by Example 01.
+- PC13 physical polarity is confined to BSP/Indication Service; Application deals in logical indication state.
+- SysTick is the only writer of the millisecond counter.
+- Thread mode may read time without blocking and owns all blink policy.
+- Period checks use modulo-safe unsigned subtraction.
 
-## 6. ISR Ownership
+### Timing budget
 
-`SysTick_Handler()` is implemented by the Board Timebase.
+At 1 kHz, SysTick fires once per millisecond; its work is one bounded counter increment. The 500 ms application action is therefore decoupled from interrupt rate. The super-loop may execute many times between toggles.
 
-The handler is intentionally minimal:
+The repository uses `volatile` for state that can change asynchronously, but `volatile` alone is not treated as a lock or a complete synchronization primitive. Where a compound take/clear or block copy must be atomic with respect to an ISR, the code uses a short PRIMASK critical section. Where SPSC ring publication depends on compiler ordering, it uses an explicit compiler barrier.
 
-```text
-interrupt -> increment counter -> return
-```
+## Timing and memory reasoning
 
-No upward callback is used.
+The project has no heap. Buffers, device state, counters, and Application state are statically or automatically allocated and are therefore visible in the link map.
 
-## 7. Concurrency
+Clock-dependent behavior is derived from CMSIS/SPL clock state wherever the example needs exact peripheral timing. The normal board configuration is 72 MHz HCLK, 72 MHz PCLK2, 36 MHz PCLK1, with APB1 timers receiving 72 MHz because their bus prescaler is not 1.
 
-`volatile uint32_t s_time_ms` is written by ISR context and read by thread mode.
+The most important timing-specific behavior for this example is described in its [README](../README.md); source constants under `config/` are authoritative.
 
-A 32-bit aligned read/write is naturally atomic on Cortex-M3 for this use case.
+## Failure and observability
 
-Timestamp subtraction uses unsigned wraparound-safe arithmetic.
+`system_init()` returns failure if the board/timebase setup cannot be established; `main()` enters `system_panic()`. This example has no runtime peripheral fault channel after successful initialization.
 
-## 8. Clock Dependency
+Initialization failure propagates toward `system_init()` instead of being silently ignored. Runtime diagnostics are deliberately low-overhead: counters, state flags, and GDB-visible globals are preferred to adding a logging subsystem that would change the example's peripheral/concurrency profile.
 
-The SPL/CMSIS system clock setup is outside Application.
+## Extension boundaries
 
-The Board Timebase derives SysTick reload from `SystemCoreClock`.
+When extending this example:
 
-When the system clock changes, the timebase remains correct as long as
-`SystemCoreClockUpdate()` reflects the new clock before SysTick configuration.
+1. keep board pin/peripheral mapping in BSP/configuration;
+2. keep external-device command semantics in ECUAL when an off-chip device is involved;
+3. expose a Service capability rather than an SPL type to Application;
+4. keep ISR work bounded and define the publication/ownership rule before writing the handler;
+5. update `config/modules.mk` only with the SPL sources actually required;
+6. run `make check-layers` before accepting the change;
+7. document any new buffer capacity, timeout, drop policy, interrupt priority, or destructive operation.
 
-## 9. Why Application Does Not Use a Busy Delay
+## References
 
-A busy delay would prevent other work from running during the entire delay.
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-The timestamp pattern instead allows:
 
-```text
-check time -> no work due -> return
-```
+---
 
-This is the foundation for every later super-loop example.
-
-## 10. Current Event-Service Scope
-
-This example does not need a general event queue.
-
-The Time Service and Indication Service are deliberately small because the
-purpose is to show the first clean dependency boundary.
-
-Add a generic event system only when the product requirements justify it.
-
-## 11. Failure Path
-
-If `board_timebase_init()` fails:
-
-```text
-board_init() -> false
-system_init() -> false
-main() -> system_panic()
-```
-
-The failure does not continue into Application with an invalid timebase.
-
-## 12. Extension Boundaries
-
-Good extensions:
-
-- new timing policy in Application;
-- new logical indication in Service;
-- different LED pin in BSP;
-- different timebase peripheral in BSP.
-
-Avoid adding GPIO/SysTick calls directly to Application.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

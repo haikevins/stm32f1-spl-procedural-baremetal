@@ -1,248 +1,144 @@
-# 01-blink-led — GPIO Output + SysTick + Non-Blocking Super-Loop
+# Blink LED — GPIO Output + SysTick
 
-## 1. Learning Objectives
+> **Scope:** Example 1 of the repository progression — GPIO output, active-low board resource, SysTick timebase, non-blocking periodic scheduling.
 
-This example introduces the core architecture used by the entire repository.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn how to:
+## Table of contents
 
-- configure the Blue Pill onboard LED through the BSP;
-- represent an active-low output as a logical indication;
-- create a 1 ms SysTick timebase;
-- schedule periodic work without a blocking delay;
-- keep Application independent from GPIO/SPL details;
-- trace startup from `Reset_Handler` to the super-loop.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Expected Result
+## Purpose and expected behavior
 
-After flashing, the onboard PC13 LED changes state every 500 ms.
+At initialization the indication is made safe/inactive before the GPIO is configured as output. SysTick then increments a millisecond counter. `application_process()` asks `time_service_periodic_due()` whether 500 ms has elapsed and toggles the logical status indication when due.
 
-Because the LED is active-low:
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: GPIO output, active-low board resource, SysTick timebase, non-blocking periodic scheduling.
 
-```text
-PC13 LOW  -> LED ON
-PC13 HIGH -> LED OFF
-```
+## Hardware and wiring
 
-One complete ON/OFF cycle therefore takes approximately one second.
-
-## 3. Hardware
-
-No external components are required.
-
-The example uses the onboard Blue Pill LED:
+Onboard Blue Pill LED on PC13, active-low. No external peripheral is required beyond SWD.
 
 ```text
-PC13 -> onboard LED
+Blue Pill PC13 ---- onboard LED network ---- 3.3 V
+
+Logical ON  -> PC13 driven LOW
+Logical OFF -> PC13 driven HIGH
 ```
 
-The board abstraction defines this resource as `BOARD_STATUS_LED_ACTIVE_LOW`.
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-## 4. Compile-Time Configuration
+## Configuration
 
-`config/board_config.h`:
+| Constant | Value | Meaning |
+|---|---:|---|
+| `APPLICATION_BLINK_PERIOD_MS` | 500 ms | logical toggle period |
+| `BOARD_TIMEBASE_HZ` | 1000 Hz | SysTick service rate |
+| `BOARD_HSE_FREQUENCY_HZ` | 8 MHz | board oscillator definition |
 
-```c
-#define BOARD_HSE_FREQUENCY_HZ (8000000UL)
-#define BOARD_TIMEBASE_HZ       (1000UL)
-```
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-`config/application_config.h`:
-
-```c
-#define APPLICATION_BLINK_PERIOD_MS (500UL)
-```
-
-The Application works in milliseconds and does not know the SysTick reload
-value or CPU frequency.
-
-## 5. Startup Flow
+## Source ownership
 
 ```text
-Reset_Handler
-    |
-    +--> initialize .data and .bss
-    +--> SystemInit()
-    +--> main()
-            |
-            +--> system_init()
-                    |
-                    +--> board_init()
-                    |      +--> SystemCoreClockUpdate()
-                    |      +--> board_led_init()
-                    |      +--> board_timebase_init()
-                    |
-                    +--> time_service_init()
-                    +--> indication_service_init()
-                    +--> application_init()
+app/src/application.c
+  -> time_service + indication_service
+services/src/time_service.c
+  -> board_timebase
+services/src/indication_service.c
+  -> board_led
+bsp/bluepill/src/board_timebase.c
+  -> SysTick / CMSIS
+bsp/bluepill/src/board_led.c
+  -> GPIOC / SPL
 ```
 
-After initialization:
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
+
+## Runtime flow
+
+```mermaid
+flowchart TD
+    RESET["Reset and system_init"] --> LED["Initialize PC13 inactive"]
+    LED --> TICK["Configure SysTick at 1 kHz"]
+    TICK --> APP["application_init stores current ms"]
+    APP --> LOOP["application_process"]
+    LOOP --> DUE{"500 ms elapsed?"}
+    DUE -- "no" --> LOOP
+    DUE -- "yes" --> TOGGLE["Toggle logical status indication"]
+    TOGGLE --> LOOP
+```
+
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### Active-low abstraction
+
+The BSP knows that PC13 is electrically active-low; `indication_service` exposes logical on/off/toggle semantics. This prevents application policy from depending on `Bit_RESET` versus `Bit_SET`.
+
+### SysTick arithmetic
+
+The BSP calls `SysTick_Config(SystemCoreClock / BOARD_TIMEBASE_HZ)`. At the normal 72 MHz core clock and 1 kHz timebase, the counter is reloaded for a 1 ms period. `SysTick_Handler` performs only a bounded increment of a `volatile uint32_t` millisecond count.
+
+`time_service_elapsed_ms()` relies on unsigned subtraction, so elapsed-time tests remain valid across the natural 32-bit wrap as long as intervals remain far below half the modulo range.
+
+### Periodic scheduling policy
+
+`time_service_periodic_due()` assigns the reference timestamp to `now` when the period expires. That is simple and appropriate here, but it means repeated loop latency can shift the phase gradually. Example 05 intentionally contrasts this with `reference += period`, which preserves nominal phase more closely.
+
+## Concurrency and ownership
+
+Only SysTick is asynchronous. The ISR owns the time counter; thread mode reads it and executes all LED policy. No GPIO action is required in interrupt context.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-for (;;)
-{
-    application_process();
-    system_idle();
-}
+board GPIO/timebase → Time Service → Indication Service → Application
 ```
 
-## 6. Clock Setup
+`system_init()` returns failure if the board/timebase setup cannot be established; `main()` enters `system_panic()`. This example has no runtime peripheral fault channel after successful initialization.
 
-This SPL project relies on the CMSIS `SystemInit()` implementation for the
-system clock configuration.
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-`board_init()` calls:
-
-```c
-SystemCoreClockUpdate();
-```
-
-before clock-dependent board modules are initialized.
-
-The timebase uses:
-
-```c
-SysTick_Config(SystemCoreClock / BOARD_TIMEBASE_HZ)
-```
-
-With a 1 kHz timebase, SysTick produces one interrupt every millisecond.
-
-The Application never uses `SystemCoreClock` directly.
-
-## 7. GPIO LED
-
-`board_led_init()`:
-
-1. enables the GPIOC peripheral clock with SPL;
-2. presets the inactive LED level;
-3. configures PC13 as a 2 MHz push-pull output.
-
-The logical API hides active-low behavior:
-
-```c
-board_led_set(true);   /* logical ON */
-board_led_set(false);  /* logical OFF */
-```
-
-`indication_service_set()` and `indication_service_toggle()` therefore remain
-independent from the electrical polarity.
-
-## 8. SysTick Timebase
-
-The BSP owns the physical timebase.
-
-`SysTick_Handler()` performs only:
-
-```c
-s_time_ms++;
-```
-
-The Time Service exposes millisecond semantics:
-
-```c
-uint32_t time_service_get_ms(void);
-uint32_t time_service_elapsed_ms(uint32_t start_time_ms);
-bool time_service_periodic_due(uint32_t *last_run_ms,
-                               uint32_t period_ms);
-```
-
-The Application does not access SysTick directly.
-
-## 9. Application State
-
-The Application stores one timestamp:
-
-```c
-static uint32_t s_last_toggle_ms;
-```
-
-Every loop:
-
-```text
-500 ms elapsed?
-    |
-    +--> no  -> return
-    |
-    +--> yes -> toggle INDICATION_STATUS
-```
-
-There is no software delay loop.
-
-This allows the same super-loop to later process UART, buttons, display, or
-other Services without being blocked for 500 ms.
-
-## 10. Architecture
-
-```text
-Application
-    |
-    +--> Time Service ------> Board Timebase ------> SysTick/CMSIS
-    |
-    +--> Indication Service -> Board LED ----------> GPIO/SPL
-```
-
-Application depends only on logical Services.
-
-See [`docs/architecture.md`](docs/architecture.md) for ownership details.
-
-## 11. Interrupt
-
-The only active interrupt is SysTick.
-
-Ownership:
-
-```text
-SysTick hardware
-    |
-    v
-Board Timebase
-    |
-    v
-SysTick_Handler()
-```
-
-The ISR only increments the time counter. It does not call the Time Service or
-Application.
-
-## 12. Idle and Panic
-
-This completed example uses:
-
-```c
-void system_idle(void)
-{
-    __NOP();
-}
-```
-
-Panic disables interrupts and stays in a `__NOP()` loop.
-
-The choice is intentionally debug-friendly for ST-Link setups without NRST.
-
-## 13. Recommended Reading Order
-
-Read:
-
-1. `app/src/application.c`
-2. `services/src/time_service.c`
-3. `services/src/indication_service.c`
-4. `bsp/bluepill/src/board_led.c`
-5. `bsp/bluepill/src/board_timebase.c`
-6. `bsp/bluepill/src/board.c`
-7. `system/system_init.c`
-8. `system/main.c`
-9. `startup/startup_stm32f10x_md.S`
-10. `docs/architecture.md`
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -252,61 +148,35 @@ make debug-server
 make debug
 ```
 
-## 14. Troubleshooting
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-### LED Does Not Blink
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-Check in this order:
+## Design decisions and limitations
 
-1. verify the firmware reaches `main()`;
-2. verify `system_init()` returns `true`;
-3. break at `SysTick_Handler()`;
-4. inspect whether the handler executes repeatedly;
-5. inspect the board time counter;
-6. break at `indication_service_toggle()`;
-7. verify PC13 output changes.
+- `__NOP()` idle favors predictable debugging, not low power.
+- A 1 ms tick consumes periodic interrupt bandwidth even though the application needs only 500 ms events.
+- The Service abstraction is intentionally more structure than a one-line LED demo needs; the structure exists to establish conventions reused later.
 
-### LED Is Always On or Always Off
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-Remember that PC13 is active-low.
+## Porting boundary
 
-Verify:
+The most important porting boundaries are LED pin/polarity, clock source, `SystemCoreClock`, and SysTick frequency. If only the board LED changes, Application and Services should remain unchanged.
 
-- board pin mapping;
-- GPIO output mode;
-- logical active-level translation;
-- whether the specific Blue Pill board actually uses PC13 for the LED.
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-### Debugger Is Difficult to Attach
+## References
 
-Verify SWD wiring and OpenOCD:
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-```text
-SWDIO
-SWCLK
-GND
-3.3V reference
-```
 
-The supplied configuration uses:
+---
 
-```tcl
-reset_config none
-```
-
-and the example uses `__NOP()` rather than sleeping in `WFI`.
-
-## 15. Extension Exercises
-
-1. Change the blink period to 100 ms.
-2. Add separate ON and OFF durations.
-3. Add a second logical indicator.
-4. Replace periodic toggle with a small Application state machine.
-5. Move the LED to another GPIO while leaving Application unchanged.
-6. Use a timer instead of SysTick for the timebase.
-
-## 16. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
-- [`../README.md`](../README.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

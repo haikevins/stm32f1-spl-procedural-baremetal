@@ -1,361 +1,175 @@
-# 08-adc-dma — TIM3 Trigger + ADC1 + DMA1 Circular Buffer
+# ADC + DMA — Timer-Triggered Sample Pipeline
 
-## 1. Learning Objectives
+> **Scope:** Example 8 of the repository progression — TIM3 TRGO at 1 kHz, ADC1 channel 0, DMA1 Channel 1 circular buffer, half/full ISR block handoff, measurement processing and LED hysteresis.
 
-This example builds a continuous sampled-data pipeline.
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
-You will learn:
+## Table of contents
 
-- PA0 analog input;
-- ADC1 clocking and calibration;
-- TIM3 TRGO as an external ADC trigger;
-- deterministic 1 kHz sample timing;
-- DMA1 Channel 1 circular transfer;
-- half-transfer/full-transfer interrupts;
-- stable block publishing;
-- DMA error/overrun diagnostics;
-- thread-mode average/min/max/mV processing;
-- hysteresis policy in Application.
+- [Purpose and expected behavior](#purpose-and-expected-behavior)
+- [Hardware and wiring](#hardware-and-wiring)
+- [Configuration](#configuration)
+- [Source ownership](#source-ownership)
+- [Runtime flow](#runtime-flow)
+- [Mechanism in depth](#mechanism-in-depth)
+- [Concurrency and ownership](#concurrency-and-ownership)
+- [Initialization and failure behavior](#initialization-and-failure-behavior)
+- [Build, flash, and debug](#build-flash-and-debug)
+- [Design decisions and limitations](#design-decisions-and-limitations)
+- [Porting boundary](#porting-boundary)
+- [References](#references)
 
-## 2. Hardware
+## Purpose and expected behavior
 
-Connect a potentiometer:
+TIM3 TRGO initiates one ADC1 conversion each millisecond. DMA circularly stores the result. Half-transfer and transfer-complete interrupts copy one 32-sample half into a staging block and publish “latest block ready.” Thread mode atomically takes that block, computes rounded average/min/max/millivolts, publishes a measurement, and drives PC13 with 300 mV hysteresis.
+
+This example remains intentionally small at Application level. The educational value is in the boundary between product policy and the lower-level mechanism: TIM3 TRGO at 1 kHz, ADC1 channel 0, DMA1 Channel 1 circular buffer, half/full ISR block handoff, measurement processing and LED hysteresis.
+
+## Hardware and wiring
+
+PA0 is configured as analog ADC1_IN0. TIM3 generates the ADC trigger; DMA1 Channel 1 moves ADC DR samples to RAM. PC13 is the active-low status LED. A potentiometer or other 0..3.3 V source can drive PA0 for testing.
 
 ```text
 3.3 V ---- potentiometer ---- GND
                   |
                   +---- PA0 / ADC1_IN0
+
+PC13 ---- onboard active-low LED
 ```
 
-PC13 is used as a threshold indicator.
+SWD uses PA13/PA14 and common ground. The checked-in OpenOCD setup does not require the probe's NRST signal.
 
-Do not intentionally drive PA0 above VDDA or below GND.
+## Configuration
 
-## 3. Compile-Time Configuration
+| Constant | Value |
+|---|---:|
+| ADC reference model | 3300 mV |
+| full-scale raw value | 4095 |
+| sample rate | 1000 samples/s |
+| trigger timer tick | 1 MHz |
+| DMA circular storage | 64 × 16-bit samples |
+| publication block | 32 samples |
+| ADC calibration loop bound | 1,000,000 iterations |
+| LED ON threshold | 1800 mV |
+| LED OFF threshold | 1500 mV |
+| DMA NVIC priority | preemption 1, subpriority 0 |
 
-```c
-#define BOARD_ADC_REFERENCE_MV                   (3300UL)
-#define BOARD_ADC_MAX_RAW_VALUE                  (4095UL)
-#define BOARD_ADC_SAMPLE_RATE_HZ                 (1000UL)
-#define BOARD_ADC_TRIGGER_TIMER_TICK_HZ          (1000000UL)
-#define BOARD_ADC_DMA_BUFFER_SAMPLE_COUNT        (64U)
-#define BOARD_ADC_DMA_BLOCK_SAMPLE_COUNT         (32U)
-#define BOARD_ADC_CALIBRATION_TIMEOUT_ITERATIONS (1000000UL)
+Compile-time constants live under `config/`; board mappings live under `bsp/bluepill/`. Application source therefore does not duplicate pin numbers, raw peripheral names, or clock-tree formulas.
 
-#define APPLICATION_ADC_LED_ON_THRESHOLD_MV      (1800U)
-#define APPLICATION_ADC_LED_OFF_THRESHOLD_MV     (1500U)
-```
-
-## 4. Data-Rate Model
-
-Sample rate:
+## Source ownership
 
 ```text
-1000 samples/s
+app/src/application.c
+  -> adc_service + indication_service
+services/src/adc_service.c
+  -> board_adc_dma block API
+bsp/bluepill/src/board_adc_dma.c
+  -> TIM3 TRGO + ADC1 + DMA1 CH1 ISR
 ```
 
-DMA circular buffer:
+The dependency direction is checked by `tools/scripts/check_layers.py`. `system/system_init.c` is the composition root and is allowed to connect the layers; Application is not.
+
+## Runtime flow
+
+```mermaid
+flowchart LR
+    TIM3["TIM3 TRGO: 1 kHz"] --> ADC["ADC1 channel 0 conversion"]
+    ADC --> DMA["DMA1 CH1 circular 64-sample buffer"]
+    DMA --> HT["HT IRQ: copy samples 0..31"]
+    DMA --> TC["TC IRQ: copy samples 32..63"]
+    HT --> STAGE["One 32-sample staging block"]
+    TC --> STAGE
+    STAGE --> SVC["Thread: min/max/average/mV"]
+    SVC --> APP["Application diagnostics + LED hysteresis"]
+```
+
+The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
+
+## Mechanism in depth
+
+### Trigger chain and rates
+
+The BSP derives the TIM3 clock using the APB1 timer x2 rule, configures a 1 MHz counter tick, and programs the update rate to 1 kHz. Timer update/TRGO therefore paces ADC acquisition in hardware; super-loop jitter does not move individual sample instants.
+
+ADC1 runs from PCLK2 divided by six under the example clock configuration, yielding about 12 MHz at the normal 72 MHz PCLK2. A 55.5-cycle sample time plus conversion overhead is comfortably shorter than the 1 ms trigger interval.
+
+### Circular DMA ownership
+
+DMA writes a 64-element `uint16_t` circular buffer. HT fires after samples 0..31; TC fires after samples 32..63. The ISR copies the completed half into a separate 32-sample staging array. That copy is a deliberate ownership simplification: thread mode never processes memory while DMA may be rewriting the same half.
+
+### One-slot latest-block policy
+
+If a previous staging block is still pending when another half completes, the overrun counter increments and the newly completed block overwrites the staging slot. The semantic is therefore **latest block wins**, not lossless queued acquisition. At 1000 samples/s, a 32-sample block spans 32 ms, so thread mode must normally consume faster than one block interval to avoid loss.
+
+`board_adc_dma_take_sample_block()` masks interrupts with PRIMASK while copying the 32-sample staging block to the caller and clearing the ready flag. This creates an unambiguous handoff at the cost of briefly delaying interrupts during the copy.
+
+### Measurement reduction
+
+The Service calculates minimum, maximum, sum, rounded average, and millivolts. The voltage conversion is integer arithmetic:
 
 ```text
-64 samples
+mV = (average_raw * 3300 + 4095/2) / 4095
 ```
 
-One half-buffer block:
+Application exposes measurement sequence, raw statistics, millivolts, DMA overruns, and DMA errors as globals so they can be inspected from GDB without adding a UART dependency.
+
+### LED hysteresis state
+
+```mermaid
+stateDiagram-v2
+    [*] --> Off
+    Off --> On: millivolts >= 1800
+    On --> Off: millivolts <= 1500
+    Off --> Off: millivolts < 1800
+    On --> On: millivolts > 1500
+```
+
+### Hysteresis
+
+The LED turns on only at/above 1800 mV and turns off only at/below 1500 mV. Values in between retain the previous state, preventing chatter around one exact threshold.
+
+## Concurrency and ownership
+
+TIM3 and ADC run autonomously; DMA is the producer; DMA ISR publishes completed blocks; thread mode consumes/processes them. The design explicitly separates hardware sample timing from software processing latency.
+
+The general repository rule still holds: the lowest layer that owns an interrupt source acknowledges/publishes hardware state, while Services/Application consume that state outside the ISR unless a truly low-level bounded operation is required.
+
+## Initialization and failure behavior
+
+Initialization order:
 
 ```text
-32 samples
+board LED + TIM3/ADC1/DMA1 pipeline → ADC/Indication Services → Application; timer starts hardware acquisition after configuration
 ```
 
-Therefore one block completes every:
+DMA transfer-error interrupts increment an error counter. Publication overwrite increments an overrun counter. ADC calibration is bounded by iteration count during init. The demo does not automatically restart a failed DMA/ADC pipeline after a runtime error.
 
-```text
-32 / 1000 s = 32 ms
-```
+`main()` treats a failed `system_init()` as fatal and calls `system_panic()`, which disables interrupts and remains in a debug-friendly halt loop.
 
-Half-transfer and transfer-complete interrupts alternate approximately every
-32 ms.
-
-## 5. Timer Trigger
-
-TIM3 is configured as the sample clock source.
-
-The BSP calculates:
-
-```text
-timer input clock
-    |
-target timer tick = 1 MHz
-    |
-period = 1 MHz / 1 kHz = 1000 counts
-```
-
-TIM3 TRGO source:
-
-```text
-update event
-```
-
-ADC1 converts once per TIM3 update.
-
-There is no TIM3 ISR.
-
-## 6. ADC Input Configuration
-
-PA0 is configured as:
-
-```text
-GPIO_Mode_AIN
-```
-
-ADC1 regular sequence contains one channel:
-
-```text
-ADC_Channel_0
-rank 1
-sample time 55.5 cycles
-```
-
-Scan and continuous modes are disabled because timing comes from the external
-timer trigger.
-
-## 7. ADC Clock Selection
-
-The example configures:
-
-```c
-RCC_ADCCLKConfig(RCC_PCLK2_Div6);
-```
-
-With a common PCLK2 of 72 MHz:
-
-```text
-ADC clock = 12 MHz
-```
-
-This remains within the STM32F103 ADC clock limit.
-
-If the clock tree is changed, review this divider explicitly.
-
-## 8. ADC Reset/Power/Calibration Sequence
-
-The BSP:
-
-1. enables ADC clock;
-2. initializes ADC configuration;
-3. enables ADC;
-4. starts reset calibration;
-5. waits with a bounded iteration timeout;
-6. starts calibration;
-7. waits with a bounded iteration timeout;
-8. enables external trigger conversion;
-9. starts TIM3.
-
-Calibration failure causes board initialization to fail.
-
-## 9. DMA Mapping
-
-ADC1 maps to:
-
-```text
-DMA1 Channel 1
-```
-
-DMA configuration:
-
-```text
-direction: peripheral -> memory
-peripheral address: ADC1->DR
-memory: 64 x uint16_t
-peripheral increment: disabled
-memory increment: enabled
-peripheral size: halfword
-memory size: halfword
-mode: circular
-priority: high
-M2M: disabled
-```
-
-## 10. DMA Interrupt Events
-
-Enabled:
-
-```text
-HT  half transfer
-TC  transfer complete
-TE  transfer error
-```
-
-NVIC preemption priority is 1.
-
-No ADC or TIM3 IRQ is required for normal sampling.
-
-## 11. IRQ Handler and Block Publishing
-
-`DMA1_Channel1_IRQHandler()`:
-
-```text
-TE?
-    |
-increment error count
-clear TE
-
-HT?
-    |
-copy samples 0..31 to completed block
-mark ready
-clear HT
-
-TC?
-    |
-copy samples 32..63 to completed block
-mark ready
-clear TC
-```
-
-The ISR does not calculate voltage or LED state.
-
-## 12. Why Copy a Block in the ISR
-
-DMA circular memory will be reused by hardware.
-
-If thread mode processed one DMA half directly while DMA later wrapped around,
-the same memory could change during processing.
-
-The example copies the completed half into a stable 32-sample block before
-publishing it.
-
-This costs ISR copy time but gives simple ownership.
-
-## 13. Thread-Mode Handoff
-
-`board_adc_dma_take_sample_block()`:
-
-1. saves PRIMASK;
-2. disables interrupts;
-3. checks block-ready flag;
-4. copies the stable block to caller storage;
-5. clears block-ready;
-6. restores PRIMASK.
-
-Only the short shared-state copy occurs inside the critical section.
-
-## 14. ADC Service Processing
-
-For each 32-sample block the Service calculates:
-
-```text
-minimum
-maximum
-sum
-rounded average
-millivolts
-sequence number
-```
-
-Conversion:
-
-```text
-mV ~= average_raw * 3300 / 4095
-```
-
-The 3300 mV reference is an assumption, not a calibrated VDDA measurement.
-
-## 15. Application Hysteresis
-
-LED policy:
-
-```text
-mV >= 1800 -> LED ON
-mV <= 1500 -> LED OFF
-between     -> keep previous state
-```
-
-The 300 mV gap prevents flicker around one threshold.
-
-## 16. Debug Globals
-
-```gdb
-p application_adc_average_raw
-p application_adc_minimum_raw
-p application_adc_maximum_raw
-p application_adc_millivolts
-p application_adc_sequence
-p application_adc_dma_overruns
-p application_adc_dma_errors
-```
-
-`application_adc_sequence` should keep increasing.
-
-## 17. Interrupt/Symbol Expectations
-
-Expected strong handler:
-
-```text
-DMA1_Channel1_IRQHandler
-```
-
-Expected unused weak handlers:
-
-```text
-ADC1_2_IRQHandler
-TIM3_IRQHandler
-```
-
-This confirms DMA owns the interrupt completion path.
-
-## 18. Initialization Flow
-
-```text
-board_init()
-    |
-    +--> board_led_init()
-    +--> board_adc_dma_init()
-            |
-            +--> clocks
-            +--> ADC clock
-            +--> PA0 analog
-            +--> DMA1 CH1
-            +--> DMA interrupts/NVIC
-            +--> ADC1 channel/trigger
-            +--> TIM3 TRGO
-            +--> ADC enable/calibration
-            +--> DMA enable
-            +--> ADC external trigger
-            +--> TIM3 start
-
-system_init()
-    |
-    +--> adc_service_init()
-    +--> indication_service_init()
-    +--> application_init()
-```
-
-## 19. Architecture
-
-```text
-TIM3 -> ADC1 -> DMA1
-                 |
-                 v
-          Board ADC/DMA
-                 |
-                 v
-            ADC Service
-                 |
-                 v
-            Application
-                 |
-                 v
-        Indication Service
-```
-
-## Build, Flash, and Debug
+## Build, flash, and debug
 
 ```bash
 make check-layers
 make clean
 make
-make flash
 ```
+
+The build creates `build/firmware.elf`, `.hex`, `.bin`, `.lst`, dependency files, and a linker map. Useful targets are:
+
+```bash
+make size
+make tree
+make flash
+make erase
+make debug-server
+make debug
+```
+
+`make all` runs the architectural layer checker before compilation. The Makefile targets Cortex-M3/Thumb, compiles C11 with `-Og -g3`, places each function/data object in its own section, links with the project linker script, enables linker garbage collection, and deliberately uses `-nostartfiles -nostdlib`. Only compiler runtime support (`-lgcc`) is linked explicitly.
+
+The repository uses ST-Link/SWD with OpenOCD and GDB. `tools/openocd/bluepill_stlink.cfg` selects the ST-Link interface, SWD transport, the STM32F1 target, a conservative 1 MHz adapter rate, and `reset_config none`. That reset policy is intentional for boards where NRST is not wired to the probe.
+
+A typical two-terminal session is:
 
 ```bash
 # Terminal 1
@@ -365,85 +179,36 @@ make debug-server
 make debug
 ```
 
-## 20. Test Procedure
+The checked-in GDB command file connects to `localhost:3333`, halts/resets the target, loads the ELF, sets a breakpoint at `main`, and continues. The ELF retains source-level debug information because the default optimization is `-Og` with `-g3`.
 
-1. Wire potentiometer.
-2. Flash firmware.
-3. Inspect `application_adc_sequence`; verify it increases.
-4. Rotate toward GND; raw should approach 0.
-5. Rotate toward 3.3 V; raw should approach 4095.
-6. Verify millivolts track position approximately.
-7. Cross 1800 mV; LED turns ON.
-8. Move below 1500 mV; LED turns OFF.
-9. Verify DMA error count stays zero.
-10. Verify overrun count normally stays zero.
+For this example, inspect its public Application/Service variables and peripheral registers in GDB rather than adding unrelated logging dependencies simply for observation.
 
-## 21. Troubleshooting
+## Design decisions and limitations
 
-### Raw Always 0
+- ISR copying 32 samples is simple and safe but costs interrupt time; ping-pong buffer ownership could avoid the copy with more state complexity.
+- One-slot publication intentionally prioritizes freshness over lossless history.
+- The 3300 mV reference is a configuration assumption, not a calibrated VDDA measurement.
+- Average/min/max are block statistics, not filtering across multiple blocks.
 
-Check:
+These are documented constraints of the example, not claims that the mechanism is universally optimal.
 
-- potentiometer wiper to PA0;
-- GPIO analog mode;
-- ADC channel 0;
-- trigger actually running;
-- DMA sequence count.
+## Porting boundary
 
-### Raw Always 4095
+ADC and DMA mappings are device-specific. Re-verify channel-to-pin mapping, ADC clock limit, sample time/source impedance, timer TRGO selection, DMA channel mapping, transfer width, IRQ flags, VDDA/reference, and trigger rate on every MCU/board change.
 
-Check:
+See [the detailed porting guide](docs/porting_guide.md) for the change matrix and validation order.
 
-- PA0 shorted to 3.3 V;
-- wiring;
-- ground;
-- analog input range.
+## References
 
-### DMA IRQ Does Not Run
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
 
-Check:
 
-- DMA1 clock;
-- Channel 1;
-- HT/TC interrupt enable;
-- NVIC enable;
-- ADC conversions;
-- TIM3 running.
+---
 
-### `dma_overruns` Increases
-
-Thread mode is not consuming published blocks fast enough.
-
-Possible causes:
-
-- long blocking work;
-- debugger halt;
-- excessive Service work;
-- sample rate too high for current design.
-
-### mV Does Not Match a Meter
-
-The firmware assumes:
-
-```text
-VDDA = 3300 mV
-```
-
-Real VDDA may differ.
-
-For calibrated voltage, measure/reference VDDA rather than assuming it.
-
-## 22. Extension Exercises
-
-1. Add multi-channel scan.
-2. Add RMS calculation.
-3. Add low-pass filtering.
-4. Remove the block copy with a carefully owned ping-pong design.
-5. Queue multiple completed blocks.
-6. Add calibrated VDDA measurement.
-7. Stream measurements over UART.
-
-## 23. Related Documentation
-
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/porting_guide.md`](docs/porting_guide.md)
+[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

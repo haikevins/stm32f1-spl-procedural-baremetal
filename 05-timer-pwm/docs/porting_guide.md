@@ -1,102 +1,121 @@
-# Porting Guide — 05-timer-pwm
+# Porting Guide — Timer PWM — TIM2 Channel 1
 
-## 1. Changing Pin/Channel on the Same Timer
+> **Scope:** What must be re-validated when `05-timer-pwm` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-Choose a valid TIM2 channel/pin mapping.
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
-Update:
+## Table of contents
 
-- GPIO pin;
-- timer channel;
-- corresponding SPL OC init/preload/set-compare functions.
+- [Porting principle](#porting-principle)
+- [Change matrix](#change-matrix)
+- [Same MCU, different board](#same-mcu-different-board)
+- [Clock and timing re-validation](#clock-and-timing-re-validation)
+- [Interrupt and concurrency re-validation](#interrupt-and-concurrency-re-validation)
+- [Moving across STM32F1 or MCU families](#moving-across-stm32f1-or-mcu-families)
+- [Validation sequence](#validation-sequence)
+- [Failure signatures](#failure-signatures)
+- [References](#references)
 
-Verify alternate-function mapping.
+## Porting principle
 
-## 2. Moving to Another Timer
+Port the **lowest layer that actually changed**. Do not move a physical pin number or SPL initialization structure upward simply because a new board is being brought up.
 
-Review:
+For this example, the stable logical behavior is: hardware PWM on PA0 with timer-clock derivation, PSC/ARR/CCR math, permille duty API, drift-aware software ramp.
 
-- APB1 vs APB2;
-- timer input clock;
-- counter width;
-- channel mapping;
-- RCC enable;
-- SPL function usage.
+## Change matrix
 
-Application/PWM Service should remain unchanged.
+| Change | Primary review |
+|---|---|
+| timer/channel | APB timer clock, AF/remap, counter width, CCR channel |
+| frequency | divisibility, PSC/ARR range, actual resolution |
+| polarity/output stage | PWM polarity and board electrical path |
+| control envelope | update period/step and phase policy |
 
-## 3. Changing PWM Frequency
+## Same MCU, different board
 
-Update:
+When changing timer/channel, recompute actual timer input from the bus prescaler rules, verify AF pin mapping/remap, timer width, PWM mode/polarity, and preload behavior. Do not copy PSC/ARR values across clock trees.
 
-```c
-BOARD_PWM_FREQUENCY_HZ
-```
+A board-only port should normally keep `app/`, most `services/`, `common/`, startup, linker, and SPL/CMSIS unchanged. Review `bsp/bluepill/`, pin mapping, board electrical assumptions, and configuration first. If an off-chip device remains the same, keep ECUAL protocol behavior unchanged and replace only its board-bus transport where possible.
 
-Verify:
+## Clock and timing re-validation
 
-```text
-timer_tick % pwm_frequency == 0
-```
+Never preserve a prescaler solely because the MCU name is similar. Verify:
 
-and that resulting period counts fit the timer.
+1. oscillator source and `HSE_VALUE`;
+2. `SystemInit()` path and measured/observed `SystemCoreClock`;
+3. AHB/APB prescalers;
+4. APB timer x2 behavior where relevant;
+5. peripheral clock source and maximum legal peripheral/device rate;
+6. conversion/transfer/debounce/timeout margins after the new clock is known.
 
-## 4. Changing Timer Resolution
+For timing-sensitive examples, calculate from clocks first and compare the expected register values with live peripheral registers in GDB.
 
-Changing `BOARD_PWM_TIMER_TICK_HZ` affects the representable period and compare
-resolution.
+## Interrupt and concurrency re-validation
 
-Verify PSC and period ranges together.
-
-## 5. Changing Fade Speed
-
-Change:
-
-```text
-PWM_BREATH_UPDATE_PERIOD_MS
-PWM_BREATH_STEP_PERMILLE
-```
-
-Approximate one-way ramp duration:
+When an IRQ is involved, verify all of the following as one contract:
 
 ```text
-1000 / step * update_period
+source flag
+   -> exact vector-table handler name
+   -> NVIC IRQ number/group
+   -> priority
+   -> flag acknowledgement order
+   -> publication into shared state
+   -> thread-mode consumption/critical section
 ```
 
-## 6. Active-Low PWM
+A port is not complete merely because the interrupt fires. The same ownership/drop/coalescing semantics must still hold.
 
-If the external load is active-low, handle polarity in the BSP/timer output
-configuration rather than changing Application duty semantics.
+SysTick is the only software interrupt needed by the demo. PWM waveform timing is an autonomous timer-hardware responsibility. Thread mode owns duty policy and register update requests through the Service.
 
-## 7. Porting to Another MCU Family
+## Moving across STM32F1 or MCU families
 
-Keep:
+For another STM32F1 part, review device density define, vector table, Flash/SRAM sizes, peripheral/remap availability, DMA request mapping, and SPL support. For a newer STM32 family, SPL is no longer the natural vendor layer: preserve Application/Service/ECUAL contracts where useful, but replace BSP/vendor initialization, startup/device support, linker memory, clock code, and debug target.
 
-```text
-Application -> PWM Service
+For another CPU architecture, also revisit critical sections, interrupt memory model, startup ABI, compiler flags, and linker conventions. `volatile`, PRIMASK, and Cortex-M exception names are not portable architectural abstractions by themselves.
+
+## Validation sequence
+
+Bring up from the bottom upward:
+
+```mermaid
+flowchart TD
+    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
+    MEM --> CLOCK["Verify core and bus clocks"]
+    CLOCK --> PIN["Verify GPIO electrical state"]
+    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
+    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
+    IRQ --> SVC["Verify Service semantics"]
+    SVC --> APP["Verify full Application behavior"]
+    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
 ```
 
-Replace Board PWM and low-level timer implementation.
+Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
 
-Re-check timer clock-tree behavior because the STM32F1 APB timer x2 rule may
-not apply identically.
+## Failure signatures
 
-## 8. Validation Checklist
+Useful porting clues:
 
--  expected timer input clock measured/derived;
--  PWM frequency correct;
--  0% really produces inactive output;
--  100% really produces continuous active output;
--  duty changes smoothly;
--  preload behavior correct;
--  no timer ISR unexpectedly enabled;
--  layer checker passes.
+- code never reaches `main` → startup/vector/linker/reset/clock problem;
+- time runs at the wrong rate → core/bus clock or prescaler assumption;
+- pin is static/wrong polarity → GPIO clock/mode/mapping or board electrical assumption;
+- interrupt flag sets but handler never runs → vector name/NVIC/IRQ grouping;
+- handler runs continuously → flag-clear sequence or enable/gating logic;
+- data corrupts only under load → ownership, buffer capacity, critical-section, or timing problem;
+- external device NACKs/returns bad ID → wiring, voltage, bus mode/rate, address/command semantics;
+- behavior works with breakpoints but not at speed → race/timing/timeout or source-impedance/bus-integrity issue.
 
-## 9. Common Pitfalls
+## References
 
-- forgetting APB timer x2;
-- using the wrong channel function;
-- selecting a pin not mapped to that timer channel;
-- period count exceeding timer width;
-- using 1000 directly as ARR instead of period-count minus one;
-- performing timer-register math in Application.
+- [STMicroelectronics — STM32F103 documentation](https://www.st.com/en/microcontrollers-microprocessors/stm32f103/documentation.html)
+- [STMicroelectronics — RM0008: STM32F101/102/103/105/107 reference manual](https://www.st.com/resource/en/reference_manual/cd00171190-stm32f101xx-stm32f102xx-stm32f103xx-advanced-arm-based-32-bit-mcus-stmicroelectronics.pdf)
+- [STMicroelectronics — PM0056: STM32F10xxx Cortex-M3 programming manual](https://www.st.com/resource/en/programming_manual/pm0056-stm32f10xxx20xxx21xxxl1xxxx-cortexm3-programming-manual-stmicroelectronics.pdf)
+- [Arm — CMSIS Core documentation](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- [GNU Binutils — linker scripts](https://sourceware.org/binutils/docs/ld/Scripts.html)
+- [OpenOCD documentation](https://openocd.org/pages/documentation.html)
+- [GDB — remote debugging](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Remote-Debugging.html)
+
+
+---
+
+[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
