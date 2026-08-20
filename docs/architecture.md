@@ -2,7 +2,7 @@
 
 > **Scope:** Architectural rules that all examples inherit: dependency direction, startup/linker ownership, composition, interrupt handoff, static memory, configuration, and validation boundaries.
 
-[← Root](../../README.md) · [← Template README](../README.md) · [Adding a module](adding_a_module.md) · [Porting guide](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [← Template README](../README.md) · [Adding a module](adding_a_module.md) · [Porting guide](porting_guide.md)
 
 ## Table of contents
 
@@ -43,20 +43,12 @@ The template is optimized for **explicit reasoning**, not minimum file count. It
 ## Allowed dependency direction
 
 ```mermaid
-flowchart TD
-    APP["app"] --> SVC["services"]
-    APP --> COMMON["common"]
-    SVC --> BSP["bsp"]
-    SVC --> ECUAL["ecual"]
-    SVC --> COMMON
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    ECUAL --> COMMON
-    BSP --> COMMON
-    BSP --> VENDOR["SPL/CMSIS"]
-    SYSTEM["system composition root"] --> APP
-    SYSTEM --> SVC
-    SYSTEM --> ECUAL
-    SYSTEM --> BSP
+    BSP --> VENDOR["SPL / CMSIS"]
 ```
 
 `tools/scripts/check_layers.py` parses local include relationships and rejects forbidden layer edges. That makes architecture part of CI/build behavior rather than prose only.
@@ -82,20 +74,12 @@ An interrupt must not be enabled before its state/buffer is ready. A Service mus
 `startup_stm32f10x_md.S` owns the vector table and reset code. The linker script supplies section symbols used by Reset_Handler.
 
 ```mermaid
-sequenceDiagram
-    participant CPU as Cortex-M3
-    participant START as Reset_Handler
-    participant LINK as Linker-defined symbols
-    participant CMSIS as SystemInit
-    participant SYS as Project main/system
-
-    CPU->>START: reset vector
-    START->>LINK: _sidata, _sdata, _edata
-    START->>START: copy initialized data to SRAM
-    START->>LINK: _sbss, _ebss
-    START->>START: zero BSS
-    START->>CMSIS: configure clock tree
-    START->>SYS: main()
+flowchart TB
+    VECTOR["Vector table"] --> RESET["Reset_Handler"]
+    RESET --> DATA["Copy .data"]
+    DATA --> BSS["Zero .bss"]
+    BSS --> CLOCK["SystemInit"]
+    CLOCK --> MAIN["main()"]
 ```
 
 The linker models 64 KiB Flash and 20 KiB SRAM, keeps the vector table, assigns `.data` load/run addresses, allocates `.bss`, reserves stack headroom, and defines zero linker heap. Static allocation still needs review because automatic stack usage is not fully proven by a linker memory total.

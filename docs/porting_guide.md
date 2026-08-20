@@ -2,7 +2,7 @@
 
 > **Scope:** A layered porting method for moving the template between boards, STM32F1 densities/parts, Cortex-M MCU families, or different CPU architectures without confusing board changes with Application changes.
 
-[← Root](../../README.md) · [← Template README](../README.md) · [Architecture](architecture.md) · [Adding a module](adding_a_module.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [← Template README](../README.md) · [Architecture](architecture.md) · [Adding a module](adding_a_module.md)
 
 ## Table of contents
 
@@ -121,16 +121,24 @@ For each peripheral verify as one unit:
 
 ## Validation order
 
-```mermaid
-flowchart TD
-    RESET["Reset/vector"] --> CRT[".data/.bss/stack"]
-    CRT --> CLOCK["Clock tree"]
-    CLOCK --> GPIO["GPIO safe states"]
-    GPIO --> PERIPH["Basic peripheral operation"]
-    PERIPH --> CONC["IRQ/DMA concurrency"]
-    CONC --> SERVICE["Service contract"]
-    SERVICE --> APP["Application behavior"]
-    APP --> LIMITS["Stress/error/power/reset limits"]
+```text
+Reset / vector
+    ↓
+.data / .bss / stack
+    ↓
+clock tree
+    ↓
+GPIO safe states
+    ↓
+basic peripheral operation
+    ↓
+IRQ / DMA concurrency
+    ↓
+Service contract
+    ↓
+Application behavior
+    ↓
+stress / error / power / reset limits
 ```
 
 Keep bring-up evidence close to the lowest boundary. A wrong UART baud is more efficiently diagnosed from clocks/BRR and a logic analyzer than from Application code.

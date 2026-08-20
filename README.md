@@ -2,7 +2,7 @@
 
 > **Scope:** Reusable skeleton extracted from the example architecture. It provides startup, linker, build/debug tooling, dependency enforcement, a composition root, and empty/near-empty project layers so a new peripheral project begins with explicit ownership rather than a monolithic `main.c`.
 
-[← Root README](../README.md) · [Examples](../examples/README.md) · [Architecture](docs/architecture.md) · [Adding a module](docs/adding_a_module.md) · [Porting guide](docs/porting_guide.md)
+[← Main README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [Examples branch](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples) · [Architecture](docs/architecture.md) · [Adding a module](docs/adding_a_module.md) · [Porting guide](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -28,7 +28,7 @@ The template is not a hardware abstraction framework. It is a **project ownershi
 - How are interrupt publication and shared-state ownership documented?
 - How can the repository automatically reject forbidden include dependencies?
 
-The eight [examples](../examples/README.md) are concrete reference implementations of those answers.
+The eight [examples](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples) are concrete reference implementations of those answers.
 
 ## What the template already owns
 
@@ -54,7 +54,7 @@ The eight [examples](../examples/README.md) are concrete reference implementatio
 ```text
 app/                    highest-level policy
 services/               hardware-independent capability APIs
- ecual/                  external-component/device protocols
+ecual/                  external-component/device protocols
 bsp/bluepill/           physical board/peripheral ownership
 common/                 portable types/utilities
 config/                 compile-time constants + SPL module list
@@ -64,7 +64,7 @@ runtime/                runtime extension point
 startup/                reset/vector table
 linker/                 memory layout
 third_party/            SPL + CMSIS
- tools/                  architectural/build/debug support
+tools/                  architectural/build/debug support
 tests/                  host-side tests/extensions
 ```
 
@@ -73,16 +73,24 @@ The placeholders are intentional. Do not create a layer merely to fill a folder;
 ## Reset and runtime
 
 ```mermaid
-flowchart TD
-    RESET["Cortex-M3 reset"] --> STARTUP["Reset_Handler"]
+flowchart TB
+    RESET["Reset"] --> STARTUP["Reset_Handler"]
     STARTUP --> DATA["Copy .data"]
     DATA --> BSS["Zero .bss"]
     BSS --> CLOCK["SystemInit"]
-    CLOCK --> MAIN["main"]
-    MAIN --> COMPOSE["system_init"]
-    COMPOSE --> APP["application_process"]
-    APP --> IDLE["system_idle"]
-    IDLE --> APP
+    CLOCK --> MAIN["main()"]
+```
+
+Thread-mode lifecycle after `main()`:
+
+```text
+system_init()
+    ↓
+application_process()
+    ↓
+system_idle()
+    ↓
+repeat
 ```
 
 The template's `system_idle()` uses `__WFI()` as a low-power-oriented placeholder, unlike the completed examples' `__NOP()` debug-friendly idle. A production WFI policy must ensure that the check-for-work and sleep transition cannot lose a wake-up event.

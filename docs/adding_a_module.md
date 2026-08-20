@@ -2,7 +2,7 @@
 
 > **Scope:** A source-to-documentation workflow for adding a peripheral, Service, off-chip device, data structure, or Application capability without breaking the repository's ownership and concurrency contracts.
 
-[← Root](../../README.md) · [← Template README](../README.md) · [Architecture](architecture.md) · [Porting guide](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [← Template README](../README.md) · [Architecture](architecture.md) · [Porting guide](porting_guide.md)
 
 ## Table of contents
 
@@ -130,9 +130,8 @@ The strong handler name must match the startup vector exactly.
 Wire from dependencies upward in `system/system_init.c`:
 
 ```mermaid
-flowchart TD
-    CLOCK["Clock and low-level state"] --> BSP["BSP resource"]
-    BSP --> DEVICE["ECUAL external device when present"]
+flowchart TB
+    BSP["BSP resource"] --> DEVICE["ECUAL device"]
     BSP --> SERVICE["Service"]
     DEVICE --> SERVICE
     SERVICE --> APP["Application"]
