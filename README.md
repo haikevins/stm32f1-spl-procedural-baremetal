@@ -72,25 +72,26 @@ The placeholders are intentional. Do not create a layer merely to fill a folder;
 
 ## Reset and runtime
 
+**Reset and C runtime**
+
 ```mermaid
 flowchart TB
-    RESET["Reset"] --> STARTUP["Reset_Handler"]
-    STARTUP --> DATA["Copy .data"]
+    RESET["Reset"] --> START["Reset_Handler"]
+    START --> DATA["Copy .data"]
     DATA --> BSS["Zero .bss"]
-    BSS --> CLOCK["SystemInit"]
+    BSS --> CLOCK["SystemInit()"]
     CLOCK --> MAIN["main()"]
 ```
 
-Thread-mode lifecycle after `main()`:
+**System construction and steady state**
 
-```text
-system_init()
-    ↓
-application_process()
-    ↓
-system_idle()
-    ↓
-repeat
+```mermaid
+flowchart TB
+    MAIN["main()"] --> INIT["system_init()"]
+    INIT --> BOARD["board_init()"]
+    BOARD --> APPINIT["application_init()"]
+    INIT -->|"fail"| PANIC["system_panic()"]
+    APPINIT --> LOOP["Repeat application_process()<br/>then system_idle() / WFI"]
 ```
 
 The template's `system_idle()` uses `__WFI()` as a low-power-oriented placeholder, unlike the completed examples' `__NOP()` debug-friendly idle. A production WFI policy must ensure that the check-for-work and sleep transition cannot lose a wake-up event.
@@ -101,8 +102,13 @@ The template panic path disables interrupts and executes `__WFI()`. With interru
 
 `check_layers.py` enforces include direction. The practical rule is:
 
-```text
-Application -> Services -> BSP / ECUAL -> vendor hardware APIs
+```mermaid
+flowchart TB
+    APP["app"] --> SVC["services"]
+    SVC --> BSP["bsp"]
+    SVC --> ECUAL["ecual"]
+    ECUAL --> BSP
+    BSP --> VENDOR["SPL / CMSIS"]
 ```
 
 `System` is the controlled exception because it is the composition root. `Common` must remain portable. SPL initialization structures should not leak into Service/Application public APIs.

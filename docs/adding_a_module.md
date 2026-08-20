@@ -131,10 +131,11 @@ Wire from dependencies upward in `system/system_init.c`:
 
 ```mermaid
 flowchart TB
-    BSP["BSP resource"] --> DEVICE["ECUAL device"]
-    BSP --> SERVICE["Service"]
+    VENDOR["SPL / CMSIS"] --> BSP["BSP resource"]
+    BSP --> DEVICE["ECUAL device"]
+    BSP --> SERVICE["Service capability"]
     DEVICE --> SERVICE
-    SERVICE --> APP["Application"]
+    SERVICE --> APP["Application policy"]
 ```
 
 If one initialization can fail, propagate the failure rather than letting a higher layer run against a half-initialized dependency.

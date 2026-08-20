@@ -75,10 +75,10 @@ An interrupt must not be enabled before its state/buffer is ready. A Service mus
 
 ```mermaid
 flowchart TB
-    VECTOR["Vector table"] --> RESET["Reset_Handler"]
+    LINK["Linker symbols<br/>.data / .bss / stack"] --> RESET["Vector table<br/>MSP + Reset_Handler"]
     RESET --> DATA["Copy .data"]
-    DATA --> BSS["Zero .bss"]
-    BSS --> CLOCK["SystemInit"]
+    DATA --> BSS["Clear .bss"]
+    BSS --> CLOCK["SystemInit()"]
     CLOCK --> MAIN["main()"]
 ```
 
