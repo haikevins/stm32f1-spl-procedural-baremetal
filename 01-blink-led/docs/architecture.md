@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `01-blink-led`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -41,16 +41,13 @@ bsp/bluepill/src/board_led.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -70,15 +67,12 @@ The order matters because a module should never receive events or invoke a depen
 ## Runtime data flow
 
 ```mermaid
-flowchart TD
-    RESET["Reset and system_init"] --> LED["Initialize PC13 inactive"]
-    LED --> TICK["Configure SysTick at 1 kHz"]
-    TICK --> APP["application_init stores current ms"]
-    APP --> LOOP["application_process"]
-    LOOP --> DUE{"500 ms elapsed?"}
-    DUE -- "no" --> LOOP
-    DUE -- "yes" --> TOGGLE["Toggle logical status indication"]
-    TOGGLE --> LOOP
+flowchart TB
+    TICK["SysTick IRQ"] --> TIME["1 ms counter"]
+    APP["application_process()"] --> DUE{"500 ms due?"}
+    TIME -. elapsed .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle status"]
+    TOGGLE --> LED["PC13 active-low"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -139,4 +133,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

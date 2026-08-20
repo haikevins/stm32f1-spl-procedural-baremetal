@@ -2,7 +2,7 @@
 
 > **Scope:** Example 8 of the repository progression — TIM3 TRGO at 1 kHz, ADC1 channel 0, DMA1 Channel 1 circular buffer, half/full ISR block handoff, measurement processing and LED hysteresis.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -71,16 +71,20 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```mermaid
-flowchart LR
-    TIM3["TIM3 TRGO: 1 kHz"] --> ADC["ADC1 channel 0 conversion"]
-    ADC --> DMA["DMA1 CH1 circular 64-sample buffer"]
-    DMA --> HT["HT IRQ: copy samples 0..31"]
-    DMA --> TC["TC IRQ: copy samples 32..63"]
-    HT --> STAGE["One 32-sample staging block"]
-    TC --> STAGE
-    STAGE --> SVC["Thread: min/max/average/mV"]
-    SVC --> APP["Application diagnostics + LED hysteresis"]
+```text
+TIM3 TRGO (1 kHz)
+      ↓
+ADC1 channel 0
+      ↓
+DMA1 CH1 circular buffer
+      ├── HT: copy samples 0..31
+      └── TC: copy samples 32..63
+      ↓
+one 32-sample staging block
+      ↓
+thread-mode min / max / average / mV
+      ↓
+Application diagnostics + LED hysteresis
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -115,13 +119,12 @@ Application exposes measurement sequence, raw statistics, millivolts, DMA overru
 
 ### LED hysteresis state
 
-```mermaid
-stateDiagram-v2
-    [*] --> Off
-    Off --> On: millivolts >= 1800
-    On --> Off: millivolts <= 1500
-    Off --> Off: millivolts < 1800
-    On --> On: millivolts > 1500
+```text
+LED OFF -- measurement >= 1800 mV --> LED ON
+LED ON  -- measurement <= 1500 mV --> LED OFF
+
+1500 mV < measurement < 1800 mV
+    -> retain the previous LED state
 ```
 
 ### Hysteresis
@@ -211,4 +214,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

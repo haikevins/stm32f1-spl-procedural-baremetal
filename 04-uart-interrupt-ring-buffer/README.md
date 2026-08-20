@@ -2,7 +2,7 @@
 
 > **Scope:** Example 4 of the repository progression — USART1 asynchronous RX/TX using two SPSC rings, error accounting, TXE interrupt gating, bounded application work.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../03-uart-polling/README.md) · [Next →](../05-timer-pwm/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../03-uart-polling/README.md) · [Next →](../05-timer-pwm/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -70,14 +70,26 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
+RX path:
+
 ```mermaid
-flowchart LR
-    UART_RX["USART1 RX hardware"] --> RX_ISR["USART1_IRQHandler RX producer"]
-    RX_ISR --> RX_RING["RX ring: 128 storage / 127 usable"]
-    RX_RING --> APP["Application consumer"]
-    APP --> TX_RING["TX ring: thread producer"]
-    TX_RING --> TX_ISR["USART1_IRQHandler TX consumer"]
-    TX_ISR --> UART_TX["USART1 TX hardware"]
+flowchart TB
+    HW["RXNE / RX error"] --> IRQ["USART1 IRQ"]
+    IRQ --> READ["Read SR + DR"]
+    READ -->|"byte"| RX["Push RX ring"]
+    READ -->|"error"| ERR["Count RX error"]
+    RX --> APP["Thread reads ring"]
+```
+
+TX path:
+
+```mermaid
+flowchart TB
+    APP["Thread queues byte"] --> TX["Push TX ring"]
+    TX --> IRQ["Enable TXE IRQ"]
+    IRQ --> POP["Pop TX ring"]
+    POP --> DR["Write USART DR"]
+    IRQ -->|"ring empty"| OFF["Disable TXE IRQ"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -192,4 +204,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../03-uart-polling/README.md) · [Next →](../05-timer-pwm/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../03-uart-polling/README.md) · [Next →](../05-timer-pwm/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

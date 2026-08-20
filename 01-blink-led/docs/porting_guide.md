@@ -2,7 +2,7 @@
 
 > **Scope:** What must be re-validated when `01-blink-led` moves to another pinout, clock tree, STM32F1 part, board, peripheral instance, or MCU family.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -78,16 +78,24 @@ For another CPU architecture, also revisit critical sections, interrupt memory m
 
 Bring up from the bottom upward:
 
-```mermaid
-flowchart TD
-    START["Reset reaches main"] --> MEM["Verify .data/.bss and stack"]
-    MEM --> CLOCK["Verify core and bus clocks"]
-    CLOCK --> PIN["Verify GPIO electrical state"]
-    PIN --> PERIPH["Verify peripheral registers/basic transaction"]
-    PERIPH --> IRQ["Verify IRQ/DMA handoff if used"]
-    IRQ --> SVC["Verify Service semantics"]
-    SVC --> APP["Verify full Application behavior"]
-    APP --> STRESS["Exercise limits, errors, timeouts, resets"]
+```text
+Reset / vector
+    ↓
+.data / .bss / stack
+    ↓
+core + bus clocks
+    ↓
+GPIO electrical state
+    ↓
+basic peripheral transaction
+    ↓
+IRQ / DMA handoff, when used
+    ↓
+Service contract
+    ↓
+Application behavior
+    ↓
+limits / errors / timeouts / reset
 ```
 
 Run `python3 tools/scripts/check_layers.py` or `make check-layers` after structural changes. Then build, inspect the map/size, flash, and debug at the lowest failing boundary.
@@ -118,4 +126,4 @@ Useful porting clues:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

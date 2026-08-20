@@ -2,7 +2,7 @@
 
 > **Scope:** Example 1 of the repository progression — GPIO output, active-low board resource, SysTick timebase, non-blocking periodic scheduling.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -68,15 +68,12 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 ## Runtime flow
 
 ```mermaid
-flowchart TD
-    RESET["Reset and system_init"] --> LED["Initialize PC13 inactive"]
-    LED --> TICK["Configure SysTick at 1 kHz"]
-    TICK --> APP["application_init stores current ms"]
-    APP --> LOOP["application_process"]
-    LOOP --> DUE{"500 ms elapsed?"}
-    DUE -- "no" --> LOOP
-    DUE -- "yes" --> TOGGLE["Toggle logical status indication"]
-    TOGGLE --> LOOP
+flowchart TB
+    TICK["SysTick IRQ"] --> TIME["1 ms counter"]
+    APP["application_process()"] --> DUE{"500 ms due?"}
+    TIME -. elapsed .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle status"]
+    TOGGLE --> LED["PC13 active-low"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -179,4 +176,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [Next →](../02-gpio-input-interrupt/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

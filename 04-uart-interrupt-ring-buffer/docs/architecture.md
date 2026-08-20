@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `04-uart-interrupt-ring-buffer`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -39,16 +39,13 @@ common/src/byte_ring_buffer.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -67,14 +64,26 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
+RX path:
+
 ```mermaid
-flowchart LR
-    UART_RX["USART1 RX hardware"] --> RX_ISR["USART1_IRQHandler RX producer"]
-    RX_ISR --> RX_RING["RX ring: 128 storage / 127 usable"]
-    RX_RING --> APP["Application consumer"]
-    APP --> TX_RING["TX ring: thread producer"]
-    TX_RING --> TX_ISR["USART1_IRQHandler TX consumer"]
-    TX_ISR --> UART_TX["USART1 TX hardware"]
+flowchart TB
+    HW["RXNE / RX error"] --> IRQ["USART1 IRQ"]
+    IRQ --> READ["Read SR + DR"]
+    READ -->|"byte"| RX["Push RX ring"]
+    READ -->|"error"| ERR["Count RX error"]
+    RX --> APP["Thread reads ring"]
+```
+
+TX path:
+
+```mermaid
+flowchart TB
+    APP["Thread queues byte"] --> TX["Push TX ring"]
+    TX --> IRQ["Enable TXE IRQ"]
+    IRQ --> POP["Pop TX ring"]
+    POP --> DR["Write USART DR"]
+    IRQ -->|"ring empty"| OFF["Disable TXE IRQ"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -136,4 +145,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `03-uart-polling`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -37,16 +37,13 @@ bsp/bluepill/src/board_uart.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -65,23 +62,17 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```mermaid
-flowchart TD
-    INIT["Initialize USART1 115200 8N1"] --> BANNER["Startup message has bytes remaining?"]
-    BANNER -- "yes" --> TXREADY{"TXE set?"}
-    TXREADY -- "yes" --> SEND["Write one banner byte"]
-    TXREADY -- "no" --> RETURN["Return to super-loop"]
-    SEND --> RETURN
-    BANNER -- "no" --> PENDING{"Echo byte pending?"}
-    PENDING -- "no" --> RXREADY{"RXNE set?"}
-    RXREADY -- "yes" --> STORE["Read byte and mark pending"]
-    RXREADY -- "no" --> RETURN
-    STORE --> PENDING
-    PENDING -- "yes" --> ECHOTX{"TXE set?"}
-    ECHOTX -- "yes" --> ECHO["Write byte and clear pending"]
-    ECHOTX -- "no" --> RETURN
-    ECHO --> RETURN
+```text
+STARTUP_TX
+    |
+    | all banner bytes accepted by TXE polling
+    v
+RX_WAIT  -- RXNE byte -->  ECHO_PENDING
+   ^                         |
+   |---- TXE accepts byte ---|
 ```
+
+Each `application_process()` call performs only immediately available work and then returns. During startup it attempts at most one banner byte. After startup it holds at most one received byte until USART1 can accept it for transmission.
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 
@@ -141,4 +132,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

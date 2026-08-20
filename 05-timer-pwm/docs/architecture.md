@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `05-timer-pwm`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -39,16 +39,13 @@ bsp/bluepill/src/board_timebase.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -67,15 +64,22 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
+Hardware carrier:
+
 ```mermaid
-flowchart TD
-    CLK["Read APB1/TIM2 clock"] --> PSC["Derive divider for 1 MHz counter"]
-    PSC --> ARR["ARR = 999 for 1000-count period"]
-    ARR --> PWM["TIM2 CH1 PWM1 + preload"]
-    PWM --> HW["Hardware emits 1 kHz waveform"]
-    TICK["SysTick millisecond time"] --> APP["Every 10 ms adjust duty by 10 permille"]
-    APP --> CCR["Service rounds permille to compare count"]
-    CCR --> PWM
+flowchart TB
+    CLOCK["TIM2 clock"] --> TICK["1 MHz timer tick"]
+    TICK --> PERIOD["ARR = 999"]
+    PERIOD --> PWM["TIM2 CH1 PWM"]
+```
+
+Slow duty policy:
+
+```mermaid
+flowchart TB
+    TIME["SysTick time"] --> DUE["10 ms due"]
+    DUE --> RAMP["Update duty"]
+    RAMP --> CCR["Write CCR1"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -136,4 +140,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

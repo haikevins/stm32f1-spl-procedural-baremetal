@@ -2,7 +2,7 @@
 
 > **Scope:** Example 2 of the repository progression — active-low button, AFIO/EXTI mapping, minimal ISR publication, deferred 30 ms debounce.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -71,25 +71,20 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 ## Runtime flow
 
 ```mermaid
-sequenceDiagram
-    participant BTN as PA0 button
-    participant ISR as EXTI0_IRQHandler
-    participant FLAG as Pending-edge flag
-    participant SVC as button_service_process
-    participant APP as application_process
+flowchart TB
+    EDGE["PA0 falling edge"] --> ISR["EXTI0 IRQ"]
+    ISR --> CLEAR["Clear EXTI0"]
+    CLEAR --> FLAG["Latch edge flag"]
+```
 
-    BTN->>ISR: falling edge
-    ISR->>FLAG: pending = true
-    ISR->>ISR: clear EXTI0 pending bit
-    SVC->>FLAG: atomic take-and-clear
-    SVC->>SVC: start/restart 30 ms debounce
-    SVC->>BTN: sample pin after window
-    alt still LOW
-        SVC->>APP: publish pressed event
-        APP->>APP: toggle indication
-    else HIGH again
-        SVC->>SVC: reject bounce/transient
-    end
+Thread-mode qualification:
+
+```mermaid
+flowchart TB
+    APP["application_process()"] --> TAKE["Take edge flag"]
+    TAKE --> WAIT["Start 30 ms window"]
+    WAIT --> SAMPLE["Sample PA0"]
+    SAMPLE -->|"LOW"| EVENT["Publish press event"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -110,14 +105,16 @@ The ISR publishes a boolean, not a counter. Multiple edges that occur before thr
 
 ### Debounce state model
 
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Qualifying: raw falling edge consumed
-    Qualifying --> Qualifying: another raw edge restarts window
-    Qualifying --> PressedEvent: 30 ms elapsed and PA0 still LOW
-    Qualifying --> Idle: 30 ms elapsed and PA0 is HIGH
-    PressedEvent --> Idle: logical event consumed
+```text
+IDLE
+  |
+  | candidate edge consumed
+  v
+QUALIFYING  -- another edge --> restart 30 ms window
+  |
+  +-- 30 ms + PA0 LOW  --> publish PRESSED event -> IDLE
+  |
+  +-- 30 ms + PA0 HIGH -------------------------> IDLE
 ```
 
 ### Deferred debounce
@@ -206,4 +203,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../01-blink-led/README.md) · [Next →](../03-uart-polling/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

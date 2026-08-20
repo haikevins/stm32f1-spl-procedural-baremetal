@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `06-i2c-display`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -39,16 +39,13 @@ bsp/bluepill/src/board_display_bus.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -68,16 +65,11 @@ The order matters because a module should never receive events or invoke a depen
 ## Runtime data flow
 
 ```mermaid
-flowchart TD
-    TIME["Start 1 kHz timebase"] --> I2C["Configure I2C1 400 kHz"]
-    I2C --> DELAY["Wait 100 ms display power-on"]
-    DELAY --> INIT["SSD1306 initialization command sequence"]
-    INIT --> FB["Render into 1024-byte framebuffer"]
-    FB --> PRESENT["Send control byte 0x40 + framebuffer"]
-    PRESENT --> OK{"Transfer succeeds?"}
-    OK -- "yes" --> WAIT["Wait until next 100 ms update"]
-    WAIT --> FB
-    OK -- "no" --> STOP["Mark display non-operational"]
+flowchart TB
+    APP["Render UI"] --> FB["Framebuffer"]
+    FB --> PRESENT["display_service_present()"]
+    PRESENT --> SSD["SSD1306 update"]
+    SSD --> I2C["Bounded I2C write"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -139,4 +131,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

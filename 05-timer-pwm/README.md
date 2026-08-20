@@ -2,7 +2,7 @@
 
 > **Scope:** Example 5 of the repository progression — hardware PWM on PA0 with timer-clock derivation, PSC/ARR/CCR math, permille duty API, drift-aware software ramp.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -65,15 +65,22 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
+Hardware carrier:
+
 ```mermaid
-flowchart TD
-    CLK["Read APB1/TIM2 clock"] --> PSC["Derive divider for 1 MHz counter"]
-    PSC --> ARR["ARR = 999 for 1000-count period"]
-    ARR --> PWM["TIM2 CH1 PWM1 + preload"]
-    PWM --> HW["Hardware emits 1 kHz waveform"]
-    TICK["SysTick millisecond time"] --> APP["Every 10 ms adjust duty by 10 permille"]
-    APP --> CCR["Service rounds permille to compare count"]
-    CCR --> PWM
+flowchart TB
+    CLOCK["TIM2 clock"] --> TICK["1 MHz timer tick"]
+    TICK --> PERIOD["ARR = 999"]
+    PERIOD --> PWM["TIM2 CH1 PWM"]
+```
+
+Slow duty policy:
+
+```mermaid
+flowchart TB
+    TIME["SysTick time"] --> DUE["10 ms due"]
+    DUE --> RAMP["Update duty"]
+    RAMP --> CCR["Write CCR1"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -112,14 +119,13 @@ Allowing compare to equal `period_counts` represents a true 100% logical duty un
 
 ### Duty-ramp state model
 
-```mermaid
-stateDiagram-v2
-    [*] --> Increasing
-    Increasing --> Increasing: add 10 permille every 10 ms
-    Increasing --> Decreasing: duty reaches 1000 permille
-    Decreasing --> Decreasing: subtract 10 permille every 10 ms
-    Decreasing --> Increasing: duty reaches 0 permille
+```text
+INCREASING -- reach 1000 permille --> DECREASING
+     ^                                  |
+     |------ reach 0 permille ----------|
 ```
+
+Every 10 ms, `INCREASING` adds 10 permille and `DECREASING` subtracts 10 permille. The direction changes only at the two endpoints.
 
 ### Two timescales
 
@@ -207,4 +213,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../04-uart-interrupt-ring-buffer/README.md) · [Next →](../06-i2c-display/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

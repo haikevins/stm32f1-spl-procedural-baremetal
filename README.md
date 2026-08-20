@@ -2,7 +2,7 @@
 
 > **Scope:** Eight independently buildable projects that introduce STM32F103 peripherals and increasingly sophisticated data-handoff patterns while preserving the same layered firmware architecture.
 
-[← Root README](../README.md) · [Reusable template](../template/README.md)
+[← Main README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [Template branch](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/template)
 
 ## Table of contents
 
@@ -20,15 +20,22 @@
 
 The examples are intentionally progressive. The peripheral changes, but the architectural vocabulary does not:
 
-```mermaid
-flowchart LR
-    E1["01 GPIO + SysTick"] --> E2["02 EXTI handoff"]
-    E2 --> E3["03 UART polling"]
-    E3 --> E4["04 UART IRQ + rings"]
-    E4 --> E5["05 hardware PWM"]
-    E5 --> E6["06 I2C + ECUAL"]
-    E6 --> E7["07 SPI NOR protocol"]
-    E7 --> E8["08 ADC + DMA pipeline"]
+```text
+01  GPIO + SysTick
+        ↓
+02  EXTI handoff + debounce
+        ↓
+03  UART polling
+        ↓
+04  UART IRQ + SPSC rings
+        ↓
+05  hardware PWM
+        ↓
+06  I2C + SSD1306 ECUAL
+        ↓
+07  SPI NOR protocol
+        ↓
+08  ADC + DMA pipeline
 ```
 
 Each stage asks two questions at once:
@@ -132,19 +139,13 @@ The OpenOCD configuration does not require NRST.
 
 ```text
 Application policy
-       |
-       v
+        ↓
 Services
-   |          v        v
- BSP      ECUAL
-   ^        |
-   +--------+
-       |
-       v
-SPL / CMSIS
-       |
-       v
-STM32 + off-chip hardware
+   ├──→ BSP ─────→ SPL / CMSIS ─────→ STM32 hardware
+   └──→ ECUAL ───→ BSP
+
+System : composition root
+Common : portable shared types/utilities
 ```
 
 `system/system_init.c` is the composition root in every project. Peripheral-specific initialization lives below it, and Application does not include raw board/vendor headers. `tools/scripts/check_layers.py` enforces this include-dependency contract.

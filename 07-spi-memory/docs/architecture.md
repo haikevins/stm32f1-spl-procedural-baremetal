@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `07-spi-memory`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -39,16 +39,13 @@ bsp/bluepill/src/board_memory_bus.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -67,18 +64,24 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```mermaid
-flowchart TD
-    ID["Read JEDEC ID with command 0x9F"] --> VALID{"Winbond manufacturer 0xEF and capacity 0x17?"}
-    VALID -- "no" --> FAIL["Record error; steady LED"]
-    VALID -- "yes" --> ERASE["WREN -> verify WEL -> 4 KiB erase 0x20"]
-    ERASE --> READY1["Poll BUSY with bounded timeout"]
-    READY1 --> PROGRAM["WREN -> page program 0x02, 32 bytes"]
-    PROGRAM --> READY2["Poll BUSY with 50 ms bound"]
-    READY2 --> READ["Read 0x03 into 32-byte buffer"]
-    READ --> CMP{"Byte-for-byte equal?"}
-    CMP -- "no" --> FAIL
-    CMP -- "yes" --> PASS["Pass; toggle heartbeat every 500 ms"]
+```text
+JEDEC validation
+   ├── fail -> system_init() fails -> system_panic()
+   └── pass
+        ↓
+4 KiB sector erase
+        ↓
+32-byte page program
+        ↓
+32-byte readback
+        ↓
+byte-for-byte compare
+        ↓
+PASS -> 500 ms heartbeat
+
+Any self-test failure after JEDEC validation
+    -> increment error count
+    -> steady status LED
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -142,4 +145,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

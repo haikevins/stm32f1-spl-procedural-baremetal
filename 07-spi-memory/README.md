@@ -2,7 +2,7 @@
 
 > **Scope:** Example 7 of the repository progression — SPI1 mode 0, software chip select, JEDEC identification, WEL/BUSY state, sector erase/page program/readback self-test.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -78,18 +78,24 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```mermaid
-flowchart TD
-    ID["Read JEDEC ID with command 0x9F"] --> VALID{"Winbond manufacturer 0xEF and capacity 0x17?"}
-    VALID -- "no" --> FAIL["Record error; steady LED"]
-    VALID -- "yes" --> ERASE["WREN -> verify WEL -> 4 KiB erase 0x20"]
-    ERASE --> READY1["Poll BUSY with bounded timeout"]
-    READY1 --> PROGRAM["WREN -> page program 0x02, 32 bytes"]
-    PROGRAM --> READY2["Poll BUSY with 50 ms bound"]
-    READY2 --> READ["Read 0x03 into 32-byte buffer"]
-    READ --> CMP{"Byte-for-byte equal?"}
-    CMP -- "no" --> FAIL
-    CMP -- "yes" --> PASS["Pass; toggle heartbeat every 500 ms"]
+```text
+JEDEC validation
+   ├── fail -> system_init() fails -> system_panic()
+   └── pass
+        ↓
+4 KiB sector erase
+        ↓
+32-byte page program
+        ↓
+32-byte readback
+        ↓
+byte-for-byte compare
+        ↓
+PASS -> 500 ms heartbeat
+
+Any self-test failure after JEDEC validation
+    -> increment error count
+    -> steady status LED
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -211,4 +217,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../06-i2c-display/README.md) · [Next →](../08-adc-dma/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

@@ -2,7 +2,7 @@
 
 > **Scope:** Example 3 of the repository progression — USART1 115200 8N1 with `try_read`/`try_write`, no IRQ/DMA, one-byte pending echo state.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -68,23 +68,17 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```mermaid
-flowchart TD
-    INIT["Initialize USART1 115200 8N1"] --> BANNER["Startup message has bytes remaining?"]
-    BANNER -- "yes" --> TXREADY{"TXE set?"}
-    TXREADY -- "yes" --> SEND["Write one banner byte"]
-    TXREADY -- "no" --> RETURN["Return to super-loop"]
-    SEND --> RETURN
-    BANNER -- "no" --> PENDING{"Echo byte pending?"}
-    PENDING -- "no" --> RXREADY{"RXNE set?"}
-    RXREADY -- "yes" --> STORE["Read byte and mark pending"]
-    RXREADY -- "no" --> RETURN
-    STORE --> PENDING
-    PENDING -- "yes" --> ECHOTX{"TXE set?"}
-    ECHOTX -- "yes" --> ECHO["Write byte and clear pending"]
-    ECHOTX -- "no" --> RETURN
-    ECHO --> RETURN
+```text
+STARTUP_TX
+    |
+    | all banner bytes accepted by TXE polling
+    v
+RX_WAIT  -- RXNE byte -->  ECHO_PENDING
+   ^                         |
+   |---- TXE accepts byte ---|
 ```
+
+Each `application_process()` call performs only immediately available work and then returns. During startup it attempts at most one banner byte. After startup it holds at most one received byte until USART1 can accept it for transmission.
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
 
@@ -188,4 +182,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../02-gpio-input-interrupt/README.md) · [Next →](../04-uart-interrupt-ring-buffer/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)

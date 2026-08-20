@@ -2,7 +2,7 @@
 
 > **Scope:** Internal ownership, dependency direction, initialization, data flow, concurrency, timing, and failure propagation for `08-adc-dma`.
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
 
 ## Table of contents
 
@@ -37,16 +37,13 @@ bsp/bluepill/src/board_adc_dma.c
 ```
 
 ```mermaid
-flowchart TD
-    SYS["system/system_init.c: composition root"] --> APP["app: policy"]
-    SYS --> SVC["services: logical capability"]
-    SYS --> BSP["bsp/bluepill: resource ownership"]
-    APP --> SVC
-    SVC --> BSP
-    SVC --> ECUAL["ecual: off-chip protocol when used"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> SPL["SPL/CMSIS"]
-    SPL --> HW["STM32 / external hardware"]
+    BSP --> SPL["SPL / CMSIS"]
+    SPL --> HW["Hardware"]
 ```
 
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
@@ -65,16 +62,20 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```mermaid
-flowchart LR
-    TIM3["TIM3 TRGO: 1 kHz"] --> ADC["ADC1 channel 0 conversion"]
-    ADC --> DMA["DMA1 CH1 circular 64-sample buffer"]
-    DMA --> HT["HT IRQ: copy samples 0..31"]
-    DMA --> TC["TC IRQ: copy samples 32..63"]
-    HT --> STAGE["One 32-sample staging block"]
-    TC --> STAGE
-    STAGE --> SVC["Thread: min/max/average/mV"]
-    SVC --> APP["Application diagnostics + LED hysteresis"]
+```text
+TIM3 TRGO (1 kHz)
+      ↓
+ADC1 channel 0
+      ↓
+DMA1 CH1 circular buffer
+      ├── HT: copy samples 0..31
+      └── TC: copy samples 32..63
+      ↓
+one 32-sample staging block
+      ↓
+thread-mode min / max / average / mV
+      ↓
+Application diagnostics + LED hysteresis
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
@@ -137,4 +138,4 @@ When extending this example:
 
 ---
 
-[← Root](../../../README.md) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../../README.md) · [← Example README](../README.md) · [Architecture](architecture.md) · [Porting](porting_guide.md)

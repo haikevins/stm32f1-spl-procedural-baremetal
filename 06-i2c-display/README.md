@@ -2,7 +2,7 @@
 
 > **Scope:** Example 6 of the repository progression — I2C1 bounded polling, SSD1306 ECUAL protocol, 128×64 static framebuffer, periodic presentation.
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
 
 ## Table of contents
 
@@ -73,16 +73,11 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 ## Runtime flow
 
 ```mermaid
-flowchart TD
-    TIME["Start 1 kHz timebase"] --> I2C["Configure I2C1 400 kHz"]
-    I2C --> DELAY["Wait 100 ms display power-on"]
-    DELAY --> INIT["SSD1306 initialization command sequence"]
-    INIT --> FB["Render into 1024-byte framebuffer"]
-    FB --> PRESENT["Send control byte 0x40 + framebuffer"]
-    PRESENT --> OK{"Transfer succeeds?"}
-    OK -- "yes" --> WAIT["Wait until next 100 ms update"]
-    WAIT --> FB
-    OK -- "no" --> STOP["Mark display non-operational"]
+flowchart TB
+    APP["Render UI"] --> FB["Framebuffer"]
+    FB --> PRESENT["display_service_present()"]
+    PRESENT --> SSD["SSD1306 update"]
+    SSD --> I2C["Bounded I2C write"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.
@@ -105,14 +100,14 @@ On failure the BSP generates STOP and clears relevant error state. There is no G
 
 ### Display-operational state
 
-```mermaid
-stateDiagram-v2
-    [*] --> Initializing
-    Initializing --> Operational: initial present succeeds
-    Initializing --> Failed: initial present fails
-    Operational --> Operational: periodic present succeeds
-    Operational --> Failed: present fails
-    Failed --> Failed: refresh is no longer attempted
+```text
+Initialization
+   ├── initial present succeeds -> enter normal super-loop
+   └── initial present fails    -> system_init() fails -> system_panic()
+
+Normal super-loop
+   └── later present fails      -> s_display_operational = false
+                                  -> no further refresh attempts
 ```
 
 ### Static rendering model
@@ -203,4 +198,4 @@ See [the detailed porting guide](docs/porting_guide.md) for the change matrix an
 
 ---
 
-[← Root](../../README.md) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
+[Main](https://github.com/haikevins/stm32f1-spl-procedural-baremetal) · [↑ Examples](../README.md) · [← Previous](../05-timer-pwm/README.md) · [Next →](../07-spi-memory/README.md) · [Architecture](docs/architecture.md) · [Porting](docs/porting_guide.md)
