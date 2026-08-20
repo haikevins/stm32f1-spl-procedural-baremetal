@@ -92,7 +92,7 @@ flowchart TB
     SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
     BSP --> VENDOR["SPL / CMSIS"]
-    VENDOR --> HW["Hardware"]
+    VENDOR --> HW["STM32F103 hardware"]
 ```
 
 The direction is enforced by `tools/scripts/check_layers.py`, not just documented as an aspiration. The checker parses project includes and rejects dependencies outside the allowed matrix. In practical terms:
@@ -109,14 +109,25 @@ That separation makes a useful distinction between **what a peripheral can do** 
 
 The project does not delegate reset handling to a vendor IDE startup package. `startup/startup_stm32f10x_md.S` owns the medium-density vector table and reset path.
 
+**Reset-to-`main()` path**
+
 ```mermaid
 flowchart TB
-    RESET["Reset"] --> RH["Reset_Handler"]
+    RESET["Reset"] --> VT["Initial MSP + reset vector"]
+    VT --> RH["Reset_Handler"]
     RH --> DATA["Copy .data"]
     DATA --> BSS["Zero .bss"]
-    BSS --> CLOCK["SystemInit"]
+    BSS --> CLOCK["SystemInit()"]
     CLOCK --> MAIN["main()"]
-    MAIN --> INIT["system_init()"]
+```
+
+**Initialization and steady-state runtime**
+
+```mermaid
+flowchart TB
+    MAIN["main()"] --> INIT["system_init()"]
+    INIT -->|"fail"| PANIC["system_panic()"]
+    INIT -->|"ok"| LOOP["Repeat application_process()<br/>then system_idle()"]
 ```
 
 The reset sequence establishes the minimum C execution contract:
