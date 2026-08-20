@@ -71,20 +71,17 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```text
-TIM3 TRGO (1 kHz)
-      ↓
-ADC1 channel 0
-      ↓
-DMA1 CH1 circular buffer
-      ├── HT: copy samples 0..31
-      └── TC: copy samples 32..63
-      ↓
-one 32-sample staging block
-      ↓
-thread-mode min / max / average / mV
-      ↓
-Application diagnostics + LED hysteresis
+```mermaid
+flowchart TB
+    TIM["TIM3 @ 1 kHz"] --> TRGO["TRGO"]
+    TRGO --> ADC["ADC1 CH0"]
+    ADC --> DMA["DMA1 CH1<br/>64-sample circular buffer"]
+    DMA --> HT["Half transfer<br/>copy 0..31"]
+    DMA --> TC["Transfer complete<br/>copy 32..63"]
+    HT --> PUB["Publish 32-sample block"]
+    TC --> PUB
+    PUB --> SVC["ADC service<br/>min / max / avg / mV"]
+    SVC --> APP["LED hysteresis<br/>1800 / 1500 mV"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

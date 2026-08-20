@@ -40,16 +40,6 @@ bsp/bluepill/src/board_led.c
   -> GPIOC / SPL
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -68,11 +58,11 @@ The order matters because a module should never receive events or invoke a depen
 
 ```mermaid
 flowchart TB
-    TICK["SysTick IRQ"] --> TIME["1 ms counter"]
-    APP["application_process()"] --> DUE{"500 ms due?"}
-    TIME -. elapsed .-> DUE
-    DUE -->|"yes"| TOGGLE["Toggle status"]
-    TOGGLE --> LED["PC13 active-low"]
+    TICK["SysTick IRQ<br/>increment millisecond tick"] --> TIME["time_service timebase"]
+    APP["application_process()"] --> DUE["500 ms period due?"]
+    TIME -. supplies elapsed time .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle indication state"]
+    TOGGLE --> LED["BSP drives active-low PC13"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.

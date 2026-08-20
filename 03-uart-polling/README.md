@@ -68,14 +68,12 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```text
-STARTUP_TX
-    |
-    | all banner bytes accepted by TXE polling
-    v
-RX_WAIT  -- RXNE byte -->  ECHO_PENDING
-   ^                         |
-   |---- TXE accepts byte ---|
+```mermaid
+stateDiagram-v2
+    [*] --> STARTUP_TX
+    STARTUP_TX --> RX_WAIT: banner complete
+    RX_WAIT --> ECHO_PENDING: RX byte
+    ECHO_PENDING --> RX_WAIT: TX accepts byte
 ```
 
 Each `application_process()` call performs only immediately available work and then returns. During startup it attempts at most one banner byte. After startup it holds at most one received byte until USART1 can accept it for transmission.

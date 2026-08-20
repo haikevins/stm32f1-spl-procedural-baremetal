@@ -38,16 +38,6 @@ bsp/bluepill/src/board_timebase.c
   -> SysTick
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -64,22 +54,11 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-Hardware carrier:
-
 ```mermaid
-flowchart TB
-    CLOCK["TIM2 clock"] --> TICK["1 MHz timer tick"]
-    TICK --> PERIOD["ARR = 999"]
-    PERIOD --> PWM["TIM2 CH1 PWM"]
-```
-
-Slow duty policy:
-
-```mermaid
-flowchart TB
-    TIME["SysTick time"] --> DUE["10 ms due"]
-    DUE --> RAMP["Update duty"]
-    RAMP --> CCR["Write CCR1"]
+stateDiagram-v2
+    [*] --> RAMP_UP
+    RAMP_UP --> RAMP_DOWN: reach 1000 permille
+    RAMP_DOWN --> RAMP_UP: reach 0 permille
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.

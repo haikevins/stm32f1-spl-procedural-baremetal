@@ -74,10 +74,11 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ```mermaid
 flowchart TB
-    APP["Render UI"] --> FB["Framebuffer"]
+    APP["Application renders UI"] --> FB["SSD1306<br/>1024-byte framebuffer"]
     FB --> PRESENT["display_service_present()"]
-    PRESENT --> SSD["SSD1306 update"]
-    SSD --> I2C["Bounded I2C write"]
+    PRESENT --> UPDATE["ssd1306_update()"]
+    UPDATE --> CMD["I2C1 command write<br/>control 0x00"]
+    UPDATE --> DATA["I2C1 data write<br/>control 0x40"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

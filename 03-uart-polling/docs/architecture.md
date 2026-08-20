@@ -36,16 +36,6 @@ bsp/bluepill/src/board_uart.c
   -> GPIOA + USART1 / SPL
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -62,17 +52,13 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```text
-STARTUP_TX
-    |
-    | all banner bytes accepted by TXE polling
-    v
-RX_WAIT  -- RXNE byte -->  ECHO_PENDING
-   ^                         |
-   |---- TXE accepts byte ---|
+```mermaid
+stateDiagram-v2
+    [*] --> STARTUP_TX
+    STARTUP_TX --> RX_WAIT: banner complete
+    RX_WAIT --> ECHO_PENDING: RX byte
+    ECHO_PENDING --> RX_WAIT: TX accepts byte
 ```
-
-Each `application_process()` call performs only immediately available work and then returns. During startup it attempts at most one banner byte. After startup it holds at most one received byte until USART1 can accept it for transmission.
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
 

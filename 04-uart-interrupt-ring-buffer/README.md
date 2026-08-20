@@ -74,22 +74,22 @@ RX path:
 
 ```mermaid
 flowchart TB
-    HW["RXNE / RX error"] --> IRQ["USART1 IRQ"]
-    IRQ --> READ["Read SR + DR"]
-    READ -->|"byte"| RX["Push RX ring"]
-    READ -->|"error"| ERR["Count RX error"]
-    RX --> APP["Thread reads ring"]
+    HW["USART1 RXNE / error"] --> IRQ["USART1_IRQHandler"]
+    IRQ --> READ["Read SR then DR"]
+    READ -->|"valid byte"| RX["Push into RX ring"]
+    READ -->|"hardware error"| ERR["Accumulate error count"]
+    RX --> APP["Thread mode pops RX ring"]
 ```
 
 TX path:
 
 ```mermaid
 flowchart TB
-    APP["Thread queues byte"] --> TX["Push TX ring"]
-    TX --> IRQ["Enable TXE IRQ"]
+    APP["Enqueue TX byte"] --> CS["Critical section<br/>ring head + TXEIE"]
+    CS --> IRQ["TXE interrupt"]
     IRQ --> POP["Pop TX ring"]
     POP --> DR["Write USART DR"]
-    IRQ -->|"ring empty"| OFF["Disable TXE IRQ"]
+    IRQ -->|"empty"| OFF["Disable TXEIE"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

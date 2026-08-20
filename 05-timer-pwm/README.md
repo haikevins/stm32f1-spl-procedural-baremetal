@@ -65,22 +65,13 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-Hardware carrier:
+The TIM2 carrier is generated autonomously after the BSP configures the timer clock, prescaler, auto-reload, PWM mode, and compare register. Thread mode changes only the slow duty envelope every 10 ms.
 
 ```mermaid
-flowchart TB
-    CLOCK["TIM2 clock"] --> TICK["1 MHz timer tick"]
-    TICK --> PERIOD["ARR = 999"]
-    PERIOD --> PWM["TIM2 CH1 PWM"]
-```
-
-Slow duty policy:
-
-```mermaid
-flowchart TB
-    TIME["SysTick time"] --> DUE["10 ms due"]
-    DUE --> RAMP["Update duty"]
-    RAMP --> CCR["Write CCR1"]
+stateDiagram-v2
+    [*] --> RAMP_UP
+    RAMP_UP --> RAMP_DOWN: reach 1000 permille
+    RAMP_DOWN --> RAMP_UP: reach 0 permille
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

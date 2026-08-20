@@ -78,24 +78,16 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ## Runtime flow
 
-```text
-JEDEC validation
-   ├── fail -> system_init() fails -> system_panic()
-   └── pass
-        ↓
-4 KiB sector erase
-        ↓
-32-byte page program
-        ↓
-32-byte readback
-        ↓
-byte-for-byte compare
-        ↓
-PASS -> 500 ms heartbeat
-
-Any self-test failure after JEDEC validation
-    -> increment error count
-    -> steady status LED
+```mermaid
+flowchart TB
+    INIT["Read JEDEC ID"] --> ID["Expected W25Q64?"]
+    ID -->|"no"| FAILINIT["Initialization fails"]
+    ID -->|"yes"| ERASE["Erase test sector"]
+    ERASE --> PROGRAM["Program 32 bytes"]
+    PROGRAM --> READ["Read back 32 bytes"]
+    READ --> VERIFY["Data equal?"]
+    VERIFY -->|"yes"| HEART["500 ms heartbeat"]
+    VERIFY -->|"no"| SOLID["LED steady ON"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

@@ -38,16 +38,6 @@ common/src/byte_ring_buffer.c
   -> generic SPSC storage mechanics
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -64,26 +54,24 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-RX path:
-
 ```mermaid
 flowchart TB
-    HW["RXNE / RX error"] --> IRQ["USART1 IRQ"]
-    IRQ --> READ["Read SR + DR"]
-    READ -->|"byte"| RX["Push RX ring"]
-    READ -->|"error"| ERR["Count RX error"]
-    RX --> APP["Thread reads ring"]
+    HW["USART1 RXNE / error"] --> IRQ["USART1_IRQHandler"]
+    IRQ --> READ["Read SR then DR"]
+    READ -->|"valid byte"| RX["Push into RX ring"]
+    READ -->|"hardware error"| ERR["Accumulate error count"]
+    RX --> APP["Thread mode pops RX ring"]
 ```
 
-TX path:
+Thread-mode qualification / consumption:
 
 ```mermaid
 flowchart TB
-    APP["Thread queues byte"] --> TX["Push TX ring"]
-    TX --> IRQ["Enable TXE IRQ"]
+    APP["Enqueue TX byte"] --> CS["Critical section<br/>ring head + TXEIE"]
+    CS --> IRQ["TXE interrupt"]
     IRQ --> POP["Pop TX ring"]
     POP --> DR["Write USART DR"]
-    IRQ -->|"ring empty"| OFF["Disable TXE IRQ"]
+    IRQ -->|"empty"| OFF["Disable TXEIE"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.

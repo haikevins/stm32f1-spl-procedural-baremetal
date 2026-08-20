@@ -38,16 +38,6 @@ bsp/bluepill/src/board_memory_bus.c
   -> SPI1 PA5/PA6/PA7 + software CS PA4
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -64,24 +54,16 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```text
-JEDEC validation
-   ├── fail -> system_init() fails -> system_panic()
-   └── pass
-        ↓
-4 KiB sector erase
-        ↓
-32-byte page program
-        ↓
-32-byte readback
-        ↓
-byte-for-byte compare
-        ↓
-PASS -> 500 ms heartbeat
-
-Any self-test failure after JEDEC validation
-    -> increment error count
-    -> steady status LED
+```mermaid
+flowchart TB
+    INIT["Read JEDEC ID"] --> ID["Expected W25Q64?"]
+    ID -->|"no"| FAILINIT["Initialization fails"]
+    ID -->|"yes"| ERASE["Erase test sector"]
+    ERASE --> PROGRAM["Program 32 bytes"]
+    PROGRAM --> READ["Read back 32 bytes"]
+    READ --> VERIFY["Data equal?"]
+    VERIFY -->|"yes"| HEART["500 ms heartbeat"]
+    VERIFY -->|"no"| SOLID["LED steady ON"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.

@@ -72,19 +72,20 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ```mermaid
 flowchart TB
-    EDGE["PA0 falling edge"] --> ISR["EXTI0 IRQ"]
-    ISR --> CLEAR["Clear EXTI0"]
-    CLEAR --> FLAG["Latch edge flag"]
+    EDGE["PA0 falling edge"] --> IRQ["EXTI0_IRQHandler"]
+    IRQ --> LATCH["Latch pending edge"]
+    LATCH --> CLEAR["Clear EXTI pending bit"]
 ```
 
 Thread-mode qualification:
 
 ```mermaid
 flowchart TB
-    APP["application_process()"] --> TAKE["Take edge flag"]
-    TAKE --> WAIT["Start 30 ms window"]
-    WAIT --> SAMPLE["Sample PA0"]
-    SAMPLE -->|"LOW"| EVENT["Publish press event"]
+    APP["application_process()"] --> PROCESS["button_service_process()"]
+    PROCESS --> TAKE["Atomically take raw edge"]
+    TAKE --> WAIT["Start / restart 30 ms window"]
+    WAIT --> SAMPLE["Later: sample PA0"]
+    SAMPLE -->|"still active"| PRESS["Publish pressed event"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

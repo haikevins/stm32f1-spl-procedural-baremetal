@@ -20,22 +20,15 @@
 
 The examples are intentionally progressive. The peripheral changes, but the architectural vocabulary does not:
 
-```text
-01  GPIO + SysTick
-        ↓
-02  EXTI handoff + debounce
-        ↓
-03  UART polling
-        ↓
-04  UART IRQ + SPSC rings
-        ↓
-05  hardware PWM
-        ↓
-06  I2C + SSD1306 ECUAL
-        ↓
-07  SPI NOR protocol
-        ↓
-08  ADC + DMA pipeline
+```mermaid
+flowchart TB
+    E1["01 GPIO + SysTick"] --> E2["02 EXTI + debounce"]
+    E2 --> E3["03 USART polling"]
+    E3 --> E4["04 USART IRQ + rings"]
+    E4 --> E5["05 TIM PWM"]
+    E5 --> E6["06 I2C + SSD1306"]
+    E6 --> E7["07 SPI + W25Q64"]
+    E7 --> E8["08 TIM + ADC + DMA"]
 ```
 
 Each stage asks two questions at once:
@@ -154,20 +147,12 @@ Common : portable shared types/utilities
 
 The sequence is deliberately educational:
 
-```text
-01: periodic counter
-      ↓
-02: ISR flag -> thread-mode qualification
-      ↓
-03: thread-only hardware polling
-      ↓
-04: ISR/thread SPSC byte streams
-      ↓
-05: hardware waveform engine + slow software control
-      ↓
-06/07: bounded synchronous device transactions
-      ↓
-08: hardware trigger -> ADC -> DMA -> ISR block publication -> thread processing
+```mermaid
+flowchart TD
+    P["Polling / super-loop ownership"] --> E["ISR records an event"]
+    E --> R["ISR and thread split a ring buffer"]
+    R --> H["Peripheral runs autonomously in hardware"]
+    H --> D["DMA owns memory writes;<br/>ISR publishes stable blocks"]
 ```
 
 A recurring invariant is that higher-level policy is never executed inside the lowest-level interrupt handler.

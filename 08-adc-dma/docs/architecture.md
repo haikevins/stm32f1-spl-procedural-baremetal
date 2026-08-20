@@ -36,16 +36,6 @@ bsp/bluepill/src/board_adc_dma.c
   -> TIM3 TRGO + ADC1 + DMA1 CH1 ISR
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -62,20 +52,17 @@ The order matters because a module should never receive events or invoke a depen
 
 ## Runtime data flow
 
-```text
-TIM3 TRGO (1 kHz)
-      ↓
-ADC1 channel 0
-      ↓
-DMA1 CH1 circular buffer
-      ├── HT: copy samples 0..31
-      └── TC: copy samples 32..63
-      ↓
-one 32-sample staging block
-      ↓
-thread-mode min / max / average / mV
-      ↓
-Application diagnostics + LED hysteresis
+```mermaid
+flowchart TB
+    TIM["TIM3 @ 1 kHz"] --> TRGO["TRGO"]
+    TRGO --> ADC["ADC1 CH0"]
+    ADC --> DMA["DMA1 CH1<br/>64-sample circular buffer"]
+    DMA --> HT["Half transfer<br/>copy 0..31"]
+    DMA --> TC["Transfer complete<br/>copy 32..63"]
+    HT --> PUB["Publish 32-sample block"]
+    TC --> PUB
+    PUB --> SVC["ADC service<br/>min / max / avg / mV"]
+    SVC --> APP["LED hysteresis<br/>1800 / 1500 mV"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.

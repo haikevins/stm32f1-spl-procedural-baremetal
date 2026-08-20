@@ -69,11 +69,11 @@ The dependency direction is checked by `tools/scripts/check_layers.py`. `system/
 
 ```mermaid
 flowchart TB
-    TICK["SysTick IRQ"] --> TIME["1 ms counter"]
-    APP["application_process()"] --> DUE{"500 ms due?"}
-    TIME -. elapsed .-> DUE
-    DUE -->|"yes"| TOGGLE["Toggle status"]
-    TOGGLE --> LED["PC13 active-low"]
+    TICK["SysTick IRQ<br/>increment millisecond tick"] --> TIME["time_service timebase"]
+    APP["application_process()"] --> DUE["500 ms period due?"]
+    TIME -. supplies elapsed time .-> DUE
+    DUE -->|"yes"| TOGGLE["Toggle indication state"]
+    TOGGLE --> LED["BSP drives active-low PC13"]
 ```
 
 The reset/startup sequence before this flow is common to every example: custom `Reset_Handler` initializes `.data` and `.bss`, calls vendor `SystemInit()`, then project `main()` calls `system_init()` and enters the cooperative loop.

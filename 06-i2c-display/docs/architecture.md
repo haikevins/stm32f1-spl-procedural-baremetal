@@ -38,16 +38,6 @@ bsp/bluepill/src/board_display_bus.c
   -> I2C1 PB6/PB7 + bounded waits
 ```
 
-```mermaid
-flowchart TB
-    APP["Application"] --> SVC["Services"]
-    SVC --> BSP["BSP"]
-    SVC --> ECUAL["ECUAL"]
-    ECUAL --> BSP
-    BSP --> SPL["SPL / CMSIS"]
-    SPL --> HW["Hardware"]
-```
-
 The layer checker is part of the architecture contract. A lower-layer implementation can change without authorizing Application to bypass its public Service interface.
 
 ## Composition and initialization
@@ -66,10 +56,11 @@ The order matters because a module should never receive events or invoke a depen
 
 ```mermaid
 flowchart TB
-    APP["Render UI"] --> FB["Framebuffer"]
+    APP["Application renders UI"] --> FB["SSD1306<br/>1024-byte framebuffer"]
     FB --> PRESENT["display_service_present()"]
-    PRESENT --> SSD["SSD1306 update"]
-    SSD --> I2C["Bounded I2C write"]
+    PRESENT --> UPDATE["ssd1306_update()"]
+    UPDATE --> CMD["I2C1 command write<br/>control 0x00"]
+    UPDATE --> DATA["I2C1 data write<br/>control 0x40"]
 ```
 
 Data does not jump directly from an interrupt/peripheral into product policy. Every arrow has an owner and an API boundary. This lets the code document both **lifetime** and **authority** of the state being moved.
