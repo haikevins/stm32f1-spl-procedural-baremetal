@@ -2,7 +2,7 @@
 
 > **Scope:** A progressive STM32F103C8T6 firmware repository for learning explicit startup, linker/runtime ownership, SPL-based peripheral control, interrupt handoff, cooperative super-loop design, and layered embedded-software architecture without HAL, an RTOS, or dynamic allocation.
 
-[Examples](examples/README.md) · [Reusable template](template/README.md) · [Template architecture](template/docs/architecture.md) · [Adding a module](template/docs/adding_a_module.md) · [Porting guide](template/docs/porting_guide.md)
+[Examples branch](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples) · [Template branch](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/template) · [Template architecture](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/blob/template/docs/architecture.md) · [Adding a module](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/blob/template/docs/adding_a_module.md) · [Porting guide](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/blob/template/docs/porting_guide.md)
 
 ## Table of contents
 
@@ -56,22 +56,13 @@ The point is not to prove that SPL is newer or better than modern STM32 librarie
 ## Repository map
 
 ```text
-stm32f1-spl-procedural-baremetal/
-├── README.md
-├── examples/
-│   ├── README.md
-│   ├── 01-blink-led/
-│   ├── 02-gpio-input-interrupt/
-│   ├── 03-uart-polling/
-│   ├── 04-uart-interrupt-ring-buffer/
-│   ├── 05-timer-pwm/
-│   ├── 06-i2c-display/
-│   ├── 07-spi-memory/
-│   └── 08-adc-dma/
-└── template/
-    ├── README.md
-    └── docs/
+GitHub repository
+├── main      -> landing README + LICENSE
+├── examples  -> eight independently buildable projects
+└── template  -> reusable project skeleton + architecture docs
 ```
+
+The three tracks are **branches**, not sibling directories inside `main`. Each branch is a complete Git snapshot and can be kept in its own local working directory. The default `main` branch is therefore documentation-only; build commands belong to a project on `examples` or to the reusable `template` branch.
 
 Every complete project uses the same structural vocabulary:
 
@@ -79,7 +70,7 @@ Every complete project uses the same structural vocabulary:
 app/         product/demo policy
 services/    hardware-independent capabilities
 bsp/         Blue Pill resource ownership
- ecual/      off-chip device protocol drivers
+ecual/      off-chip device protocol drivers
 common/      portable utilities and shared types
 config/      compile-time policy/constants
 system/      composition root, main loop, panic
@@ -88,28 +79,20 @@ runtime/     runtime extension point
 startup/     vector table + Reset_Handler
 linker/      memory map and section placement
 third_party/ SPL + CMSIS
- tools/      layer check, OpenOCD, GDB
- tests/      host-side test extension point
+tools/      layer check, OpenOCD, GDB
+tests/      host-side test extension point
 ```
 
 ## Architecture and dependency rules
 
 ```mermaid
-flowchart TD
-    APP["Application: policy and demo state"] --> SVC["Services: logical capabilities"]
-    SVC --> BSP["BSP: Blue Pill resources"]
-    SVC --> ECUAL["ECUAL: external-device protocols"]
+flowchart TB
+    APP["Application"] --> SVC["Services"]
+    SVC --> BSP["BSP"]
+    SVC --> ECUAL["ECUAL"]
     ECUAL --> BSP
-    BSP --> VENDOR["STM32F10x SPL + CMSIS"]
-    VENDOR --> HW["STM32F103C8T6 hardware"]
-    APP --> COMMON["Common: portable types/utilities"]
-    SVC --> COMMON
-    ECUAL --> COMMON
-    BSP --> COMMON
-    SYSTEM["System: composition root"] --> APP
-    SYSTEM --> SVC
-    SYSTEM --> BSP
-    SYSTEM --> ECUAL
+    BSP --> VENDOR["SPL / CMSIS"]
+    VENDOR --> HW["Hardware"]
 ```
 
 The direction is enforced by `tools/scripts/check_layers.py`, not just documented as an aspiration. The checker parses project includes and rejects dependencies outside the allowed matrix. In practical terms:
@@ -127,15 +110,13 @@ That separation makes a useful distinction between **what a peripheral can do** 
 The project does not delegate reset handling to a vendor IDE startup package. `startup/startup_stm32f10x_md.S` owns the medium-density vector table and reset path.
 
 ```mermaid
-flowchart TD
-    RESET["Cortex-M3 reset"] --> MSP["Load initial MSP from vector table"]
-    MSP --> RH["Enter Reset_Handler"]
-    RH --> DATA["Copy .data load image: Flash to SRAM"]
+flowchart TB
+    RESET["Reset"] --> RH["Reset_Handler"]
+    RH --> DATA["Copy .data"]
     DATA --> BSS["Zero .bss"]
-    BSS --> SI["Call SystemInit"]
-    SI --> MAIN["Call main"]
-    MAIN --> INIT["system_init"]
-    INIT --> LOOP["application_process + system_idle forever"]
+    BSS --> CLOCK["SystemInit"]
+    CLOCK --> MAIN["main()"]
+    MAIN --> INIT["system_init()"]
 ```
 
 The reset sequence establishes the minimum C execution contract:
@@ -225,20 +206,22 @@ int main(void)
 
 Concurrency comes only from interrupts and hardware engines such as timers/DMA. The repository therefore treats an interrupt as a **handoff boundary**, not as a second application thread.
 
-```mermaid
-sequenceDiagram
-    participant HW as Peripheral hardware
-    participant ISR as Lowest owning ISR
-    participant BUF as Static event/buffer state
-    participant LOOP as Super-loop
-    participant APP as Service/Application
-
-    HW->>ISR: flag / byte / DMA completion
-    ISR->>ISR: acknowledge bounded hardware state
-    ISR->>BUF: publish flag, counter, byte, or sample block
-    ISR-->>HW: exception return
-    LOOP->>BUF: consume with defined ownership
-    LOOP->>APP: process policy in thread mode
+```text
+Peripheral / DMA event
+        |
+        v
+lowest owning ISR
+        |
+        +--> acknowledge bounded hardware state
+        |
+        v
+static handoff state
+        |
+        v
+super-loop consumption
+        |
+        v
+Service / Application policy
 ```
 
 Patterns become progressively richer through the series: single event flags, short PRIMASK-protected take/clear operations, SPSC ring buffers with memory barriers, and DMA block publication. Long protocol transactions such as W25Q64 erase remain synchronous in their specific demo but use bounded timeouts rather than infinite status loops.
@@ -249,18 +232,20 @@ The concrete examples currently implement `system_idle()` as `__NOP()` to remain
 
 | # | Example | Hardware path | Main mechanism | Documentation |
 |---|---|---|---|---|
-| 01 | Blink LED | PC13 + SysTick | periodic non-blocking scheduling | [README](examples/01-blink-led/README.md) |
-| 02 | GPIO input interrupt | PA0 + EXTI0 + PC13 | ISR flag + thread-mode debounce | [README](examples/02-gpio-input-interrupt/README.md) |
-| 03 | UART polling | USART1 PA9/PA10 | non-blocking RXNE/TXE polling | [README](examples/03-uart-polling/README.md) |
-| 04 | UART IRQ + rings | USART1 | SPSC RX/TX rings + TXE gating | [README](examples/04-uart-interrupt-ring-buffer/README.md) |
-| 05 | Timer PWM | TIM2_CH1 PA0 | hardware PWM + drift-aware duty scheduler | [README](examples/05-timer-pwm/README.md) |
-| 06 | I2C display | I2C1 + SSD1306 | bounded bus polling + framebuffer ECUAL | [README](examples/06-i2c-display/README.md) |
-| 07 | SPI memory | SPI1 + W25Q64 | NOR command/state protocol + destructive verify | [README](examples/07-spi-memory/README.md) |
-| 08 | ADC + DMA | TIM3 -> ADC1 -> DMA1 CH1 | hardware-triggered circular sampled-data pipeline | [README](examples/08-adc-dma/README.md) |
+| 01 | Blink LED | PC13 + SysTick | periodic non-blocking scheduling | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/01-blink-led) |
+| 02 | GPIO input interrupt | PA0 + EXTI0 + PC13 | ISR flag + thread-mode debounce | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/02-gpio-input-interrupt) |
+| 03 | UART polling | USART1 PA9/PA10 | non-blocking RXNE/TXE polling | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/03-uart-polling) |
+| 04 | UART IRQ + rings | USART1 | SPSC RX/TX rings + TXE gating | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/04-uart-interrupt-ring-buffer) |
+| 05 | Timer PWM | TIM2_CH1 PA0 | hardware PWM + drift-aware duty scheduler | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/05-timer-pwm) |
+| 06 | I2C display | I2C1 + SSD1306 | bounded bus polling + framebuffer ECUAL | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/06-i2c-display) |
+| 07 | SPI memory | SPI1 + W25Q64 | NOR command/state protocol + destructive verify | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/07-spi-memory) |
+| 08 | ADC + DMA | TIM3 -> ADC1 -> DMA1 CH1 | hardware-triggered circular sampled-data pipeline | [README](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples/08-adc-dma) |
 
-The [Examples index](examples/README.md) compares wiring, interrupts, ownership, and the learning progression in more detail.
+The [Examples index](https://github.com/haikevins/stm32f1-spl-procedural-baremetal/tree/examples) compares wiring, interrupts, ownership, and the learning progression in more detail.
 
 ## Build, flash, and debug
+
+The `main` branch is a landing page and does not contain a buildable firmware tree. Run these commands from an example project on the `examples` branch or from a copied/checked-out `template` working tree.
 
 ```bash
 make check-layers
